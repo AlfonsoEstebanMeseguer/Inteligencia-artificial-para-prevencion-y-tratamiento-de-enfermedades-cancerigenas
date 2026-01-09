@@ -8,6 +8,11 @@ MEDIUM="medium"
 ADVANCED="advanced"
 EXPERT="expert"
 
+# Cache de capas aleatorias para evitar crear variables dentro de tf.function
+ROT_LAYERS={}
+ZOOM_LAYERS={}
+TRANS_LAYERS={}
+
 params={
     NONE:{"rotation":0.0,"zoom":0.0,"shift":0.0,"brightness":0.0,"contrast":0.0,"flip_prob":0.0,"hue":0.0,"saturation":0.0,"cutout_prob":0.0},
     LOW:{"rotation":5.0,"zoom":0.05,"shift":0.05,"brightness":0.05,"contrast":0.05,"flip_prob":0.3,"hue":0.02,"saturation":0.05,"cutout_prob":0.0},
@@ -31,17 +36,41 @@ def random_bool(prob):
     else:
         return False
 
+def get_rot_layer(rotation_deg):
+    key=float(rotation_deg)
+    layer=ROT_LAYERS.get(key)
+    if layer is None:
+        layer=tf.keras.layers.RandomRotation(key/360.0)
+        ROT_LAYERS[key]=layer
+    return layer
+
+def get_zoom_layer(zoom_val):
+    key=float(zoom_val)
+    layer=ZOOM_LAYERS.get(key)
+    if layer is None:
+        layer=tf.keras.layers.RandomZoom(key,key)
+        ZOOM_LAYERS[key]=layer
+    return layer
+
+def get_trans_layer(shift_val):
+    key=float(shift_val)
+    layer=TRANS_LAYERS.get(key)
+    if layer is None:
+        layer=tf.keras.layers.RandomTranslation(key,key)
+        TRANS_LAYERS[key]=layer
+    return layer
+
 """
 Función que aplica augmentaciones básicas a una imagen según los parámetros dados. Estas augmentaciones incluyen rotación, zoom, desplazamiento, 
 flips, brillo, contraste, tono y saturación.
 """
 def apply_basic_augmentations(image,params,img_size):
     if params.get("rotation",0) > 0:
-        image = tf.keras.layers.RandomRotation(params["rotation"]/360.0)(image)
+        image = get_rot_layer(params["rotation"])(image,training=True)
     if params.get("zoom",0) > 0:
-        image = tf.keras.layers.RandomZoom(params["zoom"],params["zoom"])(image)
+        image = get_zoom_layer(params["zoom"])(image,training=True)
     if params.get("shift",0) > 0: 
-        image = tf.keras.layers.RandomTranslation(params["shift"],params["shift"],)(image)
+        image = get_trans_layer(params["shift"])(image,training=True)
     if params.get("flip_prob",0) > 0:
         if random_bool(params.get("flip_prob",0)):
             image=tf.image.flip_left_right(image)
@@ -84,7 +113,7 @@ sea de un mismo color y que tape algo de la imagen. Como buscamos que el modelo 
 para que pueda aprender de más patrones. PERO OJO -> esta técnica es peligrosa porque podrías estar eliminando contínuamente zonas interesantes para aprender del tejido cancerígeno. 
 Por eso solo se aplica si se cumple una probabilidad definida en los parámetros de configuración de augmentación y en una zona aleatoria de la imagen que ocupa el 20% (por defecto)
 """
-def apply_cutout(image,img_size, ratio):
+def apply_cutout(image,img_size, ratio=0.2):
     h,w =img_size
     # Aunque las imágenes supuestamente sean todas tamañó 700x460, vamos a definir tamaño de parche dependiendo del tamaño de la imagen: decisión de diseño
     #tamaño
@@ -128,8 +157,9 @@ def apply_augmentations(image:tf.Tensor,config):
     # SOLO si augmentaciones avanzadas:
     if level in (ADVANCED, EXPERT):
         if params_cfg.get("cutout_prob",0) > 0 and random_bool(params_cfg["cutout_prob"]):
-            # Aplicamos cutout solo si se cumple probabilidad de cutout y existe
-            image=apply_cutout(image,img_size)
+            # Aplicamos cutout solo si se cumple probabilidad; ratio fijo (20%) salvo que se añada en params
+            cut_ratio=params_cfg.get("cutout_ratio",0.2)
+            image=apply_cutout(image,img_size,ratio=cut_ratio)
         # NIVEL EXPERTO: OJO!!!! -> EXPERIMENTAL
         if level==EXPERT:
             if params_cfg.get("gaussian_noise",0) > 0:

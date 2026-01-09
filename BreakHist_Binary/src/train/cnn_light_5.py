@@ -13,7 +13,7 @@ from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEF
 from src.config.readDataset import read_binary_breakhis_data
 from src.config.split_dataset import split_by_patient
 from src.models.models_definitions import build_cnn5_densenet_se
-from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,focal_loss,resolve_split_dir
+from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,focal_loss,resolve_split_dir,plot_training_history
 
 # Defaults centralizados
 EPOCHS_DEFAULT=120
@@ -30,10 +30,9 @@ THRESHOLD_DEFAULT=0.5
 ES_PATIENCE=15
 SEED=42
 # Permite ejecutar este script directamente (`python src/train/...py`) sin romper imports.
-if __name__=="__main__" and __package__ is None:
-    project_root=Path(__file__).resolve().parents[2]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0,str(project_root))
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
 
 def parse_arguments():
     """
@@ -70,12 +69,12 @@ def main():
     args=parse_arguments()
 
     # Config: subimos augment a ADVANCED para mejorar generalización
-    config=DatasetConfig((args.img_size,args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
+    config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
                            ,args.normalization_mode.lower(),SEED,args.use_class_weights
                            ,args.cache,args.shuffle_train,args.prefetch)
     
-    model_dir=Path("models")/Path(__file__).stem
-    os.makedirs(model_dir,True)
+    model_dir=PROJECT_ROOT/"models"/Path(__file__).stem
+    model_dir.mkdir(parents=True,exist_ok=True)
     split_dir=resolve_split_dir(args.splits_dir,args.split_mode)
     ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode)
     ds_bundle = get_datasets_basic(config,split_dir,True)
@@ -102,8 +101,17 @@ def main():
     history=model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],epochs=args.epochs,steps_per_epoch=ds_bundle["steps_per_epoch"],validation_steps=ds_bundle["val_steps"]
                         ,class_weight=ds_bundle["class_weights"],callbacks=callbacks,verbose=1)
 
-    run_eval_and_artifacts(model,ds_bundle,args.threshold,None,str(model_dir/"cnn5_densenet_se_predictions.npz")
-                            ,True,"last_conv",str(model_dir/"cnn5_densenet_se_final.h5"))
+    plot_training_history(history)
+
+    run_eval_and_artifacts(
+        model,
+        ds_bundle,
+        args.threshold,
+        npz_path=str(model_dir/"cnn5_densenet_se_predictions.npz"),
+        gradcam_dir=True,
+        last_conv_layer_name="last_conv",
+        save_path=str(model_dir/"cnn5_densenet_se_final.h5"),
+    )
 
 if __name__=="__main__":
     main()

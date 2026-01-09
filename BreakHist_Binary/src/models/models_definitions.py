@@ -31,7 +31,7 @@ def build_cnn_light(input_shape=(224,224,3),num_classes=1,l2_reg=1e-4):
     x=layers.Conv2D(64,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg))(x)
     x=layers.ReLU()(layers.BatchNormalization()(x))
     x=layers.MaxPooling2D((2,2))(x)
-    x=layers.Conv2D(128,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg))(x)
+    x=layers.Conv2D(128,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg),name="last_conv")(x)
     x=layers.ReLU()(layers.BatchNormalization()(x))
     x=layers.MaxPooling2D((2,2))(x)
     x=layers.GlobalAveragePooling2D()(x)
@@ -54,9 +54,9 @@ pero con el mismo resultado. Propiedad "CASCADING"
 La función "build_cnn_vgg_histology" simplemente se aprovecha de conv_block para la construcción de una cnn
 """
 def conv_block(x,filters,l2_reg,name):
-    x=layers.Conv2D(filters,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg))(x)
+    x=layers.Conv2D(filters,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg),name=f"{name}_conv1")(x)
     x=layers.ReLU()(layers.BatchNormalization()(x))
-    x=layers.Conv2D(filters,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg))(x)
+    x=layers.Conv2D(filters,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg),name=f"{name}_conv2")(x)
     x=layers.ReLU()(layers.BatchNormalization()(x))
     x=layers.MaxPooling2D((2,2))(x)
     return x
@@ -112,7 +112,7 @@ def build_cnn3_multiscale(input_shape=(224,224,3),num_classes=1,l2_reg=1e-4):
     x=layers.MaxPooling2D((2,2))(x)
     x=inception_block(x,96,l2_reg,"inc3")
     x=layers.MaxPooling2D((2,2))(x)
-    x=layers.Conv2D(128,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg))(x)
+    x=layers.Conv2D(128,(3,3),padding="same",kernel_regularizer=regularizers.l2(l2_reg),name="last_conv")(x)
     x=layers.ReLU()(layers.BatchNormalization()(x))
     x=layers.GlobalAveragePooling2D()(x)
     x=layers.Dense(256,activation="relu")(x)
@@ -165,9 +165,9 @@ def build_cnn4_residual(input_shape=(224,224,3),num_classes=1,l2_reg=1e-4,dropou
     x=make_stage(x,128,blocks=2,first_stride=2,l2_reg=l2_reg,stage_name="stage2")
     x=make_stage(x,256,blocks=2,first_stride=2,l2_reg=l2_reg,stage_name="stage3")
     x=make_stage(x,512,blocks=2,first_stride=2,l2_reg=l2_reg,stage_name="stage4")
-    x=layers.Conv2D(512,(3,3),padding="same",use_bias=False,kernel_regularizer=regularizers.l2(l2_reg))(x)
-    x=layers.BatchNormalization()(x)
-    x=layers.ReLU()(x)
+    x=layers.Conv2D(512,(3,3),padding="same",use_bias=False,kernel_regularizer=regularizers.l2(l2_reg),name="last_conv_raw")(x)
+    x=layers.BatchNormalization(name="last_conv_bn")(x)
+    x=layers.ReLU(name="last_conv")(x)
     x=layers.GlobalAveragePooling2D()(x)
     x=layers.Dropout(dropout)(x)
     x=layers.Dense(256,activation="relu")(x)
@@ -242,7 +242,9 @@ def build_cnn5_densenet_se(input_shape=(224,224,3),growth_rate=24,block_layers=(
     x=transition_layer(x,compression,l2_reg,drop_rate,name="tr2")
     x=dense_block(x,block_layers[2],growth_rate,l2_reg,drop_rate,name="db3")
     x=layers.ReLU()(layers.BatchNormalization()(x))
-    x=layers.Conv2D(256,(3,3),padding="same",use_bias=False,kernel_regularizer=regularizers.l2(l2_reg))(x)
+    x=layers.Conv2D(256,(3,3),padding="same",use_bias=False,kernel_regularizer=regularizers.l2(l2_reg),name="last_conv_raw")(x)
+    x=layers.BatchNormalization(name="last_conv_bn")(x)
+    x=layers.ReLU(name="last_conv")(x)
     x=layers.GlobalAveragePooling2D()(x)
     x=layers.Dropout(0.4)(x)
     x=layers.Dense(256,activation="relu")(x)
@@ -256,10 +258,10 @@ ResNet50 transfer: usamos la ResNet50 de ImageNet como “ojos” ya entrenados 
 GAP para aplanar y una cabeza pequeñita (Dense + dos dropouts) que decide benigno/maligno. Idea: reutilizar un buen extractor y solo ajustar lo mínimo, con regularización extra.
 """
 def build_resnet50_transfer(input_shape=(224,224,3),dropout=0.4):
-    base=tf.keras.applications.ResNet50(include_top=False,weights="imagenet",input_shape=input_shape)
-    base.trainable=False
     inp=tf.keras.Input(shape=input_shape)
-    x=base(inp,training=False)
+    base=tf.keras.applications.ResNet50(include_top=False,weights="imagenet",input_tensor=inp)
+    base.trainable=False
+    x=base.output
     x=tf.keras.layers.GlobalAveragePooling2D()(x)
     x=tf.keras.layers.Dropout(dropout)(x)
     x=tf.keras.layers.Dense(256,activation="relu")(x)
@@ -273,10 +275,10 @@ def build_resnet50_transfer(input_shape=(224,224,3),dropout=0.4):
 # EfficientNet es compacta y eficiente; solo tocamos la parte final para nuestro problema y evitamos recalentar todo el backbone.
 """
 def build_efficientnetb0_transfer(input_shape=(224,224,3),dropout=0.4):
-    base=tf.keras.applications.EfficientNetB0(include_top=False,weights="imagenet",input_shape=input_shape)
-    base.trainable=False
     inp=tf.keras.Input(shape=input_shape)
-    x=base(inp,training=False)
+    base=tf.keras.applications.EfficientNetB0(include_top=False,weights="imagenet",input_tensor=inp)
+    base.trainable=False
+    x=base.output
     x=tf.keras.layers.GlobalAveragePooling2D()(x)
     x=tf.keras.layers.Dropout(dropout)(x)
     x=tf.keras.layers.Dense(256,activation="relu")(x)

@@ -9,11 +9,11 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, regularizers
 from sklearn.metrics import (confusion_matrix,classification_report,roc_auc_score,average_precision_score)
-from src.config.create_dataset import DatasetConfig,BreakHisDataLoader, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
+from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
 from src.config.readDataset import read_binary_breakhis_data
 from src.config.split_dataset import split_by_patient
 from src.models.models_definitions import build_cnn_vgg_histology
-from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir
+from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 
 # Defaults centralizados
 EPOCHS_DEFAULT=50
@@ -32,20 +32,19 @@ ES_PATIENCE=10
 RL_PATIENCE=5
 RL_FACTOR=0.3
 RL_MIN_LR=1e-6
+
 # Permite ejecutar este script directamente (`python src/train/...py`) sin romper imports.
-if __name__=="__main__" and __package__ is None:
-    project_root=Path(__file__).resolve().parents[2]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0,str(project_root))
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
 
 def parse_arguments():
     """
     Expone los hiperparámetros principales vía CLI manteniendo los defaults originales.
     """
     parser = argparse.ArgumentParser(description="Entrena la CNN VGG-like (desde cero) para BreakHis.")
-    project_root=Path(__file__).resolve().parents[2]
-    default_base=project_root/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
-    default_splits=project_root/"splits"
+    default_base=PROJECT_ROOT/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
+    default_splits=PROJECT_ROOT/"splits"
     parser.add_argument("--base-path",default=str(default_base),help="Ruta raíz del dataset BreakHis (binario).")
     parser.add_argument("--splits-dir",default=str(default_splits),help="Directorio donde se guardan/leen los JSON de splits.")
     parser.add_argument("--epochs",type=int,default=EPOCHS_DEFAULT,help=f"Número de épocas de entrenamiento (default {EPOCHS_DEFAULT}).")
@@ -73,8 +72,8 @@ def parse_arguments():
 def main():
     # Leer argumentos sin modificar los valores por defecto originales
     args=parse_arguments()
-    model_dir=Path("models")/Path(__file__).stem
-    os.makedirs(model_dir,exist_ok=True)
+    model_dir=PROJECT_ROOT/"models"/Path(__file__).stem
+    model_dir.mkdir(parents=True,exist_ok=True)
 
     # Chequeo de configuraciones y diccionario para construcción de dataset de entrenamiento
     config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
@@ -101,8 +100,17 @@ def main():
                       ,steps_per_epoch=ds_bundle["steps_per_epoch"],validation_steps=ds_bundle["val_steps"]
                       ,class_weight=ds_bundle["class_weights"],callbacks=callbacks,verbose=1)
 
-    run_eval_and_artifacts(model,ds_bundle,args.threshold,None,str(model_dir/"cnn_vgg_histology_predictions.npz")
-                           ,True,"block4_conv2",str(model_dir/"cnn_vgg_histology_final.h5"))
+    plot_training_history(history)
+
+    run_eval_and_artifacts(
+        model,
+        ds_bundle,
+        args.threshold,
+        npz_path=str(model_dir/"cnn_vgg_histology_predictions.npz"),
+        gradcam_dir=True,  # truthy flag to enable Grad-CAM display
+        last_conv_layer_name="block4_conv2",
+        save_path=str(model_dir/"cnn_vgg_histology_final.h5"),
+    )
 
 
 if __name__=="__main__":

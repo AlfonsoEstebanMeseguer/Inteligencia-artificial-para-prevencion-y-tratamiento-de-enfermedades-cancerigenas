@@ -1,20 +1,34 @@
-import os, math, json
+import os, math, json, traceback
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from sklearn.metrics import (confusion_matrix,classification_report,roc_auc_score,average_precision_score,accuracy_score)
 from src.config.readDataset import read_binary_breakhis_data
-from src.config.split_dataset import split_by_patient, split_by_image
-from src.config.create_dataset import load_split,create_dataset,compute_class_weights,decode_image,preprocess_image
+from src.config.split_dataset import split_by_patient as split_by_patient_shared, split_by_image as split_by_image_shared
+from src.config.create_dataset import load_split as load_split_binary,create_dataset as create_dataset_binary,compute_class_weights as compute_class_weights_binary,decode_image,preprocess_image
+from BreakHist_Multiclass.config.readDataset import read_multiclass_breakhis_data
+from BreakHist_Multiclass.config.create_dataset import load_split as load_split_multiclass,create_dataset as create_dataset_multiclass,compute_class_weights as compute_class_weights_multiclass
 
 """
 Esta función se encarga únicamente de crear cualquier.json que pueda faltar tras split. Simplemente ofrece mayor eficacia al programa en caso de que borremos los scripts
 previamente al entrenamiento
 """
-def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,split_mode="patient"):
-    # Normalizamos la carpeta de splits según el modo solicitado.
-    split_dir=resolve_split_dir(split_dir,split_mode)
+def resolve_dataset_helpers(dataset_type):
+    if dataset_type=="binary":
+        return (read_binary_breakhis_data, split_by_patient_shared, split_by_image_shared,
+                load_split_binary, create_dataset_binary, compute_class_weights_binary)
+    if dataset_type=="multiclass":
+        return (read_multiclass_breakhis_data, split_by_patient_shared, split_by_image_shared,
+                load_split_multiclass, create_dataset_multiclass, compute_class_weights_multiclass)
+    raise ValueError(f"Tipo de dataset no soportado: {dataset_type}")
+
+def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,split_mode="patient",dataset_type="binary",random_state=None):
+    # Normalizamos la carpeta de splits según el modo solicitado solo si aún no incluye el sufijo esperado.
+    target_suffix="split_patient" if split_mode=="patient" else "split_imagen"
+    if Path(split_dir).name != target_suffix:
+        split_dir=resolve_split_dir(split_dir,split_mode)
+    read_data,split_by_patient_fn,split_by_image_fn,_,_,_= resolve_dataset_helpers(dataset_type)
     missing=[]
     for s in ["train","val","test"]:
         split_path=os.path.join(split_dir,f"{s}.json")
@@ -48,13 +62,26 @@ def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,
     if regenerate:
         # Preparamos carpeta y leemos dataset completo para dividir
         os.makedirs(split_dir,exist_ok=True)
-        _,all_images,all_labels,_,slides=read_binary_breakhis_data(base_path,verbose=False)
+        if dataset_type=="multiclass":
+            _,all_images,all_labels,label_map,slides=read_data(base_path,verbose=False)
+        else:
+            _,all_images,all_labels,label_map,slides=read_data(base_path,verbose=False)
         if split_mode=="patient":
             # Split estratificado por paciente (sin fuga)
-            splits,_=split_by_patient(all_images,all_labels,slides,train_size,val_size,test_size)
+            if dataset_type=="multiclass":
+                splits,_=split_by_patient_fn(all_images,all_labels,slides,train_size=train_size,val_size=val_size,test_size=test_size
+                                             ,random_state=random_state,dataset_type="multiclass",label_map=label_map)
+            else:
+                splits,_=split_by_patient_fn(all_images,all_labels,slides,train_size,val_size,test_size,random_state=random_state
+                                             ,dataset_type="binary",label_map=label_map)
         else:
             # Split estratificado por clase a nivel de imagen (permite fuga)
-            splits,_=split_by_image(all_images,all_labels,slides,train_size,val_size,test_size)
+            if dataset_type=="multiclass":
+                splits,_=split_by_image_fn(all_images,all_labels,slides,train_size=train_size,val_size=val_size,test_size=test_size
+                                           ,random_state=random_state,dataset_type="multiclass",label_map=label_map)
+            else:
+                splits,_=split_by_image_fn(all_images,all_labels,slides,train_size,val_size,test_size,random_state=random_state
+                                           ,dataset_type="binary",label_map=label_map)
         # Guardamos cada subconjunto en JSON (se reescriben si falta alguno o si se regeneró por rutas inválidas)
         for split in ["train","val","test"]:
             with open(os.path.join(split_dir,f"{split}.json"),"w",encoding="utf-8") as f:
@@ -85,20 +112,26 @@ las imágenes, incluso si el batch es incompleto.
 
 Tras obtener los datasets, los steps y los pesos (si procede), devuelve un diccionario con la información de configuración lista para entrenamiento.
 """
-def get_datasets_basic(config,split_dir,include_labels=False):
-    train_imgs,train_labels=load_split(split_dir,"train")
-    val_imgs,val_labels=load_split(split_dir,"val")
-    test_imgs,test_labels=load_split(split_dir,"test")
+def get_datasets_basic(config,split_dir,include_labels=False,dataset_type="binary"):
+    _,_,_,load_split_fn,create_dataset_fn,compute_class_weights_fn=resolve_dataset_helpers(dataset_type)
+    train_imgs,train_labels=load_split_fn(split_dir,"train")
+    val_imgs,val_labels=load_split_fn(split_dir,"val")
+    test_imgs,test_labels=load_split_fn(split_dir,"test")
     if len(train_imgs)==0 or len(val_imgs)==0 or len(test_imgs)==0:
         raise RuntimeError("Algún split está vacío")
-    train_ds=create_dataset(train_imgs,train_labels,True,config)
-    val_ds=create_dataset(val_imgs,val_labels,False,config)
-    test_ds=create_dataset(test_imgs,test_labels,False,config)
+    if dataset_type=="multiclass":
+        train_ds=create_dataset_fn(train_imgs,train_labels,training=True,config=config)
+        val_ds=create_dataset_fn(val_imgs,val_labels,training=False,config=config)
+        test_ds=create_dataset_fn(test_imgs,test_labels,training=False,config=config)
+    else:
+        train_ds=create_dataset_fn(train_imgs,train_labels,True,config)
+        val_ds=create_dataset_fn(val_imgs,val_labels,False,config)
+        test_ds=create_dataset_fn(test_imgs,test_labels,False,config)
     steps_per_epoch=math.ceil(len(train_imgs)/config["batch_size"])
     val_steps=math.ceil(len(val_imgs)/config["batch_size"])
     test_steps=math.ceil(len(test_imgs)/config["batch_size"])
     if config["use_class_weights"]:
-        class_weights=compute_class_weights(train_labels)
+        class_weights=compute_class_weights_fn(train_labels)
     else:
         class_weights=None
     num_classes=int(np.max(train_labels))+1
@@ -108,6 +141,38 @@ def get_datasets_basic(config,split_dir,include_labels=False):
     if include_labels:
         out.update({"train_labels":np.array(train_labels,dtype=np.int32),"val_labels":np.array(val_labels,dtype=np.int32),"test_labels":np.array(test_labels,dtype=np.int32)})
     return out
+
+def plot_training_history(history, metrics=None, save_path=None, show=True):
+    history_dict=getattr(history,"history",history)
+    if metrics is None:
+        metrics=[m for m in history_dict.keys() if not m.startswith("val_")]
+    metrics=[m for m in metrics if m in history_dict]
+    if not metrics:
+        print("No hay métricas para graficar.")
+        return None
+    fig,ax=plt.subplots(figsize=(10,5))
+    color_cycle=plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for idx,metric in enumerate(metrics):
+        color=color_cycle[idx % len(color_cycle)]
+        ax.plot(history_dict[metric],label=f"train_{metric}",color=color,linestyle="-")
+        val_key=f"val_{metric}"
+        if val_key in history_dict:
+            ax.plot(history_dict[val_key],label=val_key,color=color,linestyle="--")
+    ax.set_title("Curvas de entrenamiento")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Valor")
+    handles,labels=ax.get_legend_handles_labels()
+    ax.grid(True)
+    plt.tight_layout()
+    legend_fig,legend_ax=plt.subplots(figsize=(10,1.5))
+    legend_ax.axis("off")
+    legend_ax.legend(handles,labels,loc="center",ncol=min(len(labels),4),frameon=True)
+    if show:
+        plt.show()
+    plt.close(fig)
+    plt.close(legend_fig)
+    return fig,legend_fig
+
 
 """
 Función que evalúa en test y devuelve métricas y predicciones. Obtenemos todo test y comprobamos predicción del modelo ya entrenado con 'predict' donde
@@ -182,7 +247,6 @@ def plot_confusion_matrix(cm,labels=("Benign","Malignant")):
             ax.text(j,i,f"{cm[i, j]}",ha="center",va="center",color=col)
     plt.tight_layout()
     plt.show()
-    plt.close(fig)
     return fig
 
 """
@@ -191,8 +255,28 @@ y la última capa convolucional del modelo en cuestión. Este modelo es necesari
 , ej sigmoide o binarycrossentropy), es decir, el valor real predicho por la última capa convolucional. Y, necesitamos el resultado final del modelo, para calcular gradientes de 
 calor-frio. Usamos GradientTape, proporcionado por tensorflow para registrar todos los cálculos realizados en una cinta, que se usará para la representación. De seguido,
 """
+def find_layer_recursive(model, layer_name):
+    """Busca una capa por nombre, devolviendo (layer, parent_model) si se encuentra."""
+    for layer in model.layers:
+        if layer.name==layer_name:
+            return layer, model
+        if isinstance(layer, tf.keras.Model) and hasattr(layer, "layers"):
+            found=find_layer_recursive(layer,layer_name)
+            if found[0] is not None:
+                return found
+    return None, None
+
 def make_gradcam_heatmap(model, img_array,last_conv_layer_name):
-    grad_model=tf.keras.models.Model([model.inputs],[model.get_layer(last_conv_layer_name).output,model.output])
+    target_layer,parent_model=find_layer_recursive(model,last_conv_layer_name)
+    if target_layer is None:
+        raise ValueError(f"No se encontró la capa {last_conv_layer_name} en el modelo para Grad-CAM.")
+    # Si la capa está en un modelo anidado (p.ej. resnet50), necesitamos reencaminar al input del modelo principal
+    if parent_model is model:
+        target_tensor=target_layer.output
+    else:
+        intermediate=tf.keras.models.Model(parent_model.input,target_layer.output)
+        target_tensor=intermediate(model.input)
+    grad_model=tf.keras.models.Model(model.input,[target_tensor,model.output])
     with tf.GradientTape() as tape:
         conv_outputs,predictions=grad_model(img_array) # salidas de la última capa conv y pred final
         loss_vals=[]
@@ -223,7 +307,13 @@ def make_gradcam_heatmap(model, img_array,last_conv_layer_name):
 """
 Función que muestra un overlay Grad-CAM para una imagen dada. Antes guardábamos 3 tipos de imágenes (original, heatmap y overlay); ahora solo las mostramos.
 """
-def show_gradcam_example(model,config,image_path,last_conv_layer_name):
+def label_to_text(label):
+    try:
+        return "malignant" if int(label)==1 else "benign"
+    except Exception:
+        return str(label)
+
+def show_gradcam_example(model,config,image_path,last_conv_layer_name,label=None,threshold=0.5):
     # Sabemos que vamos a trabajar con imágenes, por ello debemos convertirlas de tensores a imágenes,
     # hacemos lo mismo que en la función decode_image de create dataset
     img_decoded=decode_image(tf.constant(image_path))
@@ -237,12 +327,18 @@ def show_gradcam_example(model,config,image_path,last_conv_layer_name):
     heatmap=np.expand_dims(heatmap,axis=-1) #make_graccam_heatmap devuelve 2 dimensiones (Wc,Wc), expando a (Hc,Wc,1) para operaciones como resize (no permite con 2 dimnensiones)
     heatmap=tf.image.resize(heatmap,config["img_size"]).numpy().astype(np.uint8)
     # Muy importante ya que en Grad-CAM se calcula a resolución de la capa convolucional, aqui devolvemos la dimensiíon orignial
+    # Predicción para mostrar en la cabecera
+    pred_prob=float(model.predict(img_array,verbose=0).ravel()[0])
+    pred_label=1 if pred_prob>=threshold else 0
     fig,axes=plt.subplots(1,2,figsize=(8,4)) # original y heatmap
     axes[0].imshow(img_decoded)
-    axes[0].set_title("Original")
+    if label is not None:
+        axes[0].set_title(f"Original (label: {label_to_text(label)})")
+    else:
+        axes[0].set_title("Original")
     axes[0].axis("off")
     axes[1].imshow(heatmap[..., 0],cmap="jet") # jet -> azul baja importancia, rojo alta importancia
-    axes[1].set_title("Heatmap")
+    axes[1].set_title(f"Heatmap (pred: {label_to_text(pred_label)} | p={pred_prob:.2f})")
     axes[1].axis("off")
     plt.tight_layout() # evitamos cortar textos 
     plt.show()
@@ -264,15 +360,29 @@ def run_eval_and_artifacts(model,ds_bundle,threshold,npz_path=None,gradcam_dir=N
         np.savez(npz_path,y_true=y_true,y_prob=y_prob,y_pred=y_pred,threshold=threshold)
         print(f"Probabilidades y etiquetas guardadas en {npz_path}")
     if gradcam_dir:
-        sample_paths=ds_bundle["test_imgs"][:3]
-        for i,img_path in enumerate(sample_paths,1):
-            try:
-                show_gradcam_example(model,ds_bundle["config"],img_path,last_conv_layer_name)
-            except Exception:
-                print("No se pudo generar Grad-CAM")
+        sample_paths=ds_bundle["test_imgs"]
+        sample_labels=ds_bundle.get("test_labels",[None]*len(sample_paths))
+        n_samples=min(3,len(sample_paths))
+        if n_samples==0:
+            print("No hay imágenes de test para Grad-CAM.")
+        else:
+            rng=np.random.default_rng()
+            selected_idx=rng.choice(len(sample_paths),size=n_samples,replace=False)
+            for i,idx in enumerate(selected_idx,1):
+                img_path=sample_paths[idx]
+                label=sample_labels[idx] if idx < len(sample_labels) else None
+                try:
+                    show_gradcam_example(model,ds_bundle["config"],img_path,last_conv_layer_name,label=label,threshold=threshold)
+                except Exception:
+                    print("No se pudo generar Grad-CAM")
+                    print(traceback.format_exc())
     if save_path:
         os.makedirs(os.path.dirname(save_path),exist_ok=True)
-        model.save(save_path)
+        # Permite guardar sólo pesos si se pasa un nombre de archivo de pesos
+        if str(save_path).endswith(".weights.h5"):
+            model.save_weights(save_path)
+        else:
+            model.save(save_path)
         print(f"Modelo guardado en {save_path}")
     return metrics,cm,y_true,y_prob,y_pred
 

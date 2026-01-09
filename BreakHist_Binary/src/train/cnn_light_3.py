@@ -9,11 +9,11 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, regularizers
 from sklearn.metrics import (confusion_matrix,classification_report,roc_auc_score,average_precision_score)
-from src.config.create_dataset import DatasetConfig,BreakHisDataLoader, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
+from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
 from src.config.readDataset import read_binary_breakhis_data
 from src.config.split_dataset import split_by_patient
 from src.models.models_definitions import build_cnn3_multiscale
-from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir
+from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 
 # Defaults centralizados
 EPOCHS_DEFAULT=60
@@ -76,7 +76,7 @@ def main():
     args=parse_arguments()
     model_dir=Path("models")/Path(__file__).stem
     os.makedirs(model_dir,exist_ok=True)
-    config=DatasetConfig((args.img_size,args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
+    config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
                          ,args.normalization_mode.lower(),SEED,args.use_class_weights
                          ,args.cache,args.shuffle_train,args.prefetch)
 
@@ -97,9 +97,17 @@ def main():
     history=model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],epochs=args.epochs,steps_per_epoch=ds_bundle["steps_per_epoch"]
                       ,validation_steps=ds_bundle["val_steps"]
                       ,class_weight=ds_bundle["class_weights"],callbacks=callbacks,verbose=1)
+    plot_training_history(history)
 
-    run_eval_and_artifacts(model,ds_bundle,args.threshold,None,str(model_dir/"cnn3_multiscale_predictions.npz")
-                           ,True,"last_conv",str(model_dir/"cnn3_multiscale_final.h5"))
+    run_eval_and_artifacts(
+        model,
+        ds_bundle,
+        args.threshold,
+        npz_path=str(model_dir/"cnn3_multiscale_predictions.npz"),
+        gradcam_dir=True,
+        last_conv_layer_name="last_conv",
+        save_path=str(model_dir/"cnn3_multiscale_final.h5"),
+    )
 
 
 if __name__=="__main__":

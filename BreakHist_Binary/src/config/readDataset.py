@@ -1,9 +1,9 @@
 import os
 import argparse  
 
-DEFAULT_BASE_PATH = os.environ.get("BREAKHIS_BASE"
-                                   ,os.path.join(os.getcwd(),"BreakHist","data","BreakHis - Breast Cancer Histopathological Database"
-                                                 ,"dataset_cancer_v1","dataset_cancer_v1","classificacao_binaria"))
+DEFAULT_BASE_PATH = os.environ.get("BREAKHIS_BASE",os.path.join(os.getcwd(),"BreakHist_Binary","BreakHist","data"
+                                ,"BreakHis - Breast Cancer Histopathological Database"
+                                ,"dataset_cancer_v1","dataset_cancer_v1","classificacao_binaria"))
 
 """
 Función que devuelve un diccionario con las columnas parseadas del nombre de alguna imágen de BreakHist
@@ -148,5 +148,4 @@ def main():
 
 if __name__=="__main__":
     main()
-
 

@@ -1,10 +1,12 @@
 import os
 import sys
+import json
 import argparse
 from pathlib import Path
 import tensorflow as tf
+from BreakHist_Binary.src.utils.utils import plot_training_history
 from BreakHist_Multiclass.config.create_dataset import DatasetConfig
-from BreakHist_Multiclass.utils.utils import ensure_splits, get_datasets_basic, evaluate_multiclass, resolve_split_dir
+from BreakHist_Multiclass.utils.utils import (ensure_splits,get_datasets_basic,evaluate_multiclass,resolve_split_dir,DEFAULT_TRAIN_SIZE,DEFAULT_VAL_SIZE,DEFAULT_TEST_SIZE,DEFAULT_RANDOM_STATE,)
 from BreakHist_Multiclass.models.models_definitions import build_cnn_transfer_1
 
 # Ajuste de path para ejecución directa
@@ -39,42 +41,44 @@ def main():
     os.makedirs(model_dir,exist_ok=True)
     config=DatasetConfig(tuple(args.img_size),args.batch_size,args.use_class_weights,"efficientnet")
     split_dir=resolve_split_dir(args.splits_dir,args.split_mode)
-    ensure_splits(args.base_path,split_dir,args.split_mode)
-    ds_bundle=get_datasets_basic(config,split_dir,True)
+    ensure_splits(args.base_path,split_dir,train_size=DEFAULT_TRAIN_SIZE,val_size=DEFAULT_VAL_SIZE,test_size=DEFAULT_TEST_SIZE
+                  ,split_mode=args.split_mode,dataset_type="multiclass",random_state=DEFAULT_RANDOM_STATE)
+    
+    ds_bundle=get_datasets_basic(config,split_dir,include_labels=True,dataset_type="multiclass")
     num_classes=ds_bundle["num_classes"]
     model,base=build_cnn_transfer_1((*config["img_size"],3),num_classes,args.dropout,args.trainable_at)
     # cabeza
-    model.compile(optimizer=tf.keras.optimizers.Adam(args.lr_head),
-                  loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-                  metrics=["accuracy"])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(args.lr_head),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+        metrics=["accuracy",tf.keras.metrics.SparseTopKCategoricalAccuracy(k=2,name="top2_acc"),tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3,name="top3_acc")])
     
-    cbs1=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"best_head.weights.h5"),monitor="val_accuracy",mode="max",save_best_only=True,verbose=1,save_weights_only=True),
-          tf.keras.callbacks.EarlyStopping(monitor="val_accuracy",patience=5,restore_best_weights=True)]
+    cbs1=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"best_head.weights.h5"),monitor="val_accuracy",mode="max",save_best_only=True,verbose=1,save_weights_only=True)
+          ,tf.keras.callbacks.EarlyStopping(monitor="val_accuracy",patience=5,restore_best_weights=True)]
     
-    model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],
-              epochs=args.epochs_head,steps_per_epoch=ds_bundle["steps_per_epoch"],
-              validation_steps=ds_bundle["val_steps"],
-              class_weight=ds_bundle["class_weights"],
-              callbacks=cbs1,verbose=1)
+    history_head=model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],epochs=args.epochs_head,steps_per_epoch=ds_bundle["steps_per_epoch"]
+                           ,validation_steps=ds_bundle["val_steps"],class_weight=ds_bundle["class_weights"],callbacks=cbs1,verbose=1)
+
+    plot_training_history(history_head)
 
     # fine-tuning
     base.trainable=True
-    model.compile(optimizer=tf.keras.optimizers.Adam(args.lr_ft),
-                  loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-                  metrics=["accuracy"])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(args.lr_ft),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+        metrics=["accuracy",tf.keras.metrics.SparseTopKCategoricalAccuracy(k=2,name="top2_acc"),tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3,name="top3_acc")])
     
-    cbs2=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"best_ft.weights.h5"),monitor="val_accuracy",mode="max",save_best_only=True,verbose=1,save_weights_only=True),
-          tf.keras.callbacks.EarlyStopping(monitor="val_accuracy",patience=8,restore_best_weights=True),
-          tf.keras.callbacks.ReduceLROnPlateau(monitor="val_accuracy",factor=0.3,patience=3,min_lr=1e-6,verbose=1)]
+    cbs2=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"best_ft.weights.h5"),monitor="val_accuracy",mode="max",save_best_only=True,verbose=1,save_weights_only=True)
+          ,tf.keras.callbacks.EarlyStopping(monitor="val_accuracy",patience=8,restore_best_weights=True)
+          ,tf.keras.callbacks.ReduceLROnPlateau(monitor="val_accuracy",factor=0.3,patience=3,min_lr=1e-6,verbose=1)]
     
-    model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],
-              epochs=args.epochs_ft,steps_per_epoch=ds_bundle["steps_per_epoch"],
-              validation_steps=ds_bundle["val_steps"],
-              class_weight=ds_bundle["class_weights"],
-              callbacks=cbs2,verbose=1)
+    history_ft=model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],epochs=args.epochs_ft,steps_per_epoch=ds_bundle["steps_per_epoch"],validation_steps=ds_bundle["val_steps"]
+                         ,class_weight=ds_bundle["class_weights"],callbacks=cbs2,verbose=1)
+
+    plot_training_history(history_ft)
 
     metrics,cm,report=evaluate_multiclass(model,ds_bundle)
-    print("\nMétricas finales:",metrics)
+    print("\nMétricas finales:\n",json.dumps(metrics,indent=2,ensure_ascii=False))
     print("\nMatriz de confusión:\n",cm)
     print("\nClassification report:\n",report)
     try:

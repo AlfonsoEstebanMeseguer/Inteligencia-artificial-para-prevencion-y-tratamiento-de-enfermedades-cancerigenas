@@ -7,10 +7,8 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import matplotlib.pyplot as plt
 from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
-from src.config.readDataset import read_binary_breakhis_data
-from src.config.split_dataset import split_by_patient
 from src.models.models_definitions import build_efficientnetb0_transfer
-from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir
+from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 
 # Defaults centralizados
 IMG_SIZE_DEFAULT=[224,224]
@@ -35,18 +33,16 @@ RL_FACTOR=0.3
 RL_MIN_LR=1e-7
 SEED=42
 # Permite ejecutar este script directamente (`python src/train/...py`) sin romper imports.
-if __name__=="__main__" and __package__ is None:
-    project_root=Path(__file__).resolve().parents[2]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0,str(project_root))
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
 
 def parse_arguments():
     """
     Hiperparámetros expuestos por CLI manteniendo los defaults actuales.
     """
-    project_root=Path(__file__).resolve().parents[2]
-    default_base=project_root/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
-    default_splits=project_root/"splits"
+    default_base=PROJECT_ROOT/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
+    default_splits=PROJECT_ROOT/"splits"
     parser=argparse.ArgumentParser(description="Transfer learning con EfficientNetB0 sobre BreakHis (binario).")
     parser.add_argument("--base-path",default=str(default_base),help="Ruta raíz del dataset BreakHis (binario).")
     parser.add_argument("--splits-dir",default=str(default_splits),help="Directorio de JSONs de split.")
@@ -83,8 +79,8 @@ def main():
                          ,args.normalization_mode.lower(),SEED,args.use_class_weights,args.cache
                          ,args.shuffle_train,args.prefetch)
     
-    model_dir=Path("models")/Path(__file__).stem
-    os.makedirs(model_dir,True)
+    model_dir=PROJECT_ROOT/"models"/Path(__file__).stem
+    model_dir.mkdir(parents=True,exist_ok=True)
     split_dir=resolve_split_dir(args.splits_dir,args.split_mode)
     ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode)
     ds=get_datasets_basic(config,split_dir,False)
@@ -100,8 +96,9 @@ def main():
     callbacks=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"cnn7_effnetb0_best.weights.h5"),monitor="val_auc",mode="max",save_best_only=True,save_weights_only=True,verbose=1)
            ,tf.keras.callbacks.EarlyStopping(monitor="val_auc",mode="max",patience=ES_HEAD_PATIENCE,restore_best_weights=True)]
 
-    model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_head,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"]
+    history_head=model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_head,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"]
               ,class_weight=ds["class_weights"],callbacks=callbacks,verbose=1)
+    plot_training_history(history_head)
 
     # fine-tuning parcial
     base.trainable=True
@@ -119,12 +116,19 @@ def main():
             ,tf.keras.callbacks.EarlyStopping(monitor="val_auc",mode="max",patience=ES_FT_PATIENCE,restore_best_weights=True)
             ,tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc",mode="max",factor=RL_FACTOR,patience=RL_PATIENCE, min_lr=RL_MIN_LR,verbose=1)]
 
-    model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_ft,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"],class_weight=ds["class_weights"]
+    history_ft=model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_ft,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"],class_weight=ds["class_weights"]
               ,callbacks=callbacks2,verbose=1)
+    plot_training_history(history_ft)
 
-    run_eval_and_artifacts(model,ds,args.threshold,None,str(model_dir/"cnn7_effnetb0_predictions.npz")
-                           ,True,"top_conv",None)
-
+    run_eval_and_artifacts(
+        model,
+        ds,
+        args.threshold,
+        npz_path=str(model_dir/"cnn7_effnetb0_predictions.npz"),
+        gradcam_dir=True,
+        last_conv_layer_name="top_activation",
+        save_path=None,  # evitamos model.save con AdamW
+    )
     model.save_weights(str(model_dir/"cnn7_effnetb0_transfer_final.weights.h5"))
 
 if __name__=="__main__":

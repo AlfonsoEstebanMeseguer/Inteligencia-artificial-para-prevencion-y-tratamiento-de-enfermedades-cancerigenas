@@ -27,7 +27,7 @@ def _agg_color(df_color,group_col):
     return res
 
 # Path base configurable via variable de entorno para portabilidad
-base_path=os.environ.get('BREAKHIS_BASE',os.path.join(os.getcwd(),'BreakHist','data','BreakHis - Breast Cancer Histopathological Database','dataset_cancer_v1','dataset_cancer_v1','classificacao_binaria'))
+base_path=os.environ.get('BREAKHIS_BASE',os.path.join(os.getcwd(),'BreakHist_Binary','BreakHist','data','BreakHis - Breast Cancer Histopathological Database','dataset_cancer_v1','dataset_cancer_v1','classificacao_binaria'))
 # Numero de imagenes a muestrear en el analisis de imagenes
 sample_images=100
 # Mapeo de labels de la base BreakHis
@@ -243,24 +243,31 @@ if all(col in df_resultados.columns for col in numeric_cols):
     plt.tight_layout()
     plt.show(block=True)
 
-# Visualizaciones de imagenes por subtipo (2 por subtipo) y matriz aumentos-subtipos
+# Visualizaciones de imagenes por subtipo (muestra compacta en matriz) y matriz aumentos-subtipos
 if 'subclass' in df.columns and not df['subclass'].isnull().all():
     subtypes=df['subclass'].unique().tolist()
-    n_subtypes=len(subtypes)
-    nrows=n_subtypes
-    ncols=2
-    fig,axes=plt.subplots(nrows,ncols,figsize=(8,4*n_subtypes))
-    for i,sub in enumerate(subtypes):
+    samples=[]
+    for sub in subtypes:
         subset=df[df['subclass']==sub].sample(min(2,len(df[df['subclass']==sub])),random_state=42)
-        for j,(idx,row) in enumerate(subset.iterrows()):
-            ax=axes[i,j] if n_subtypes>1 else axes[j]
-            img=Image.open(row['filepath'])
+        for _,row in subset.iterrows():
+            samples.append((row['filepath'],row['label_name'],sub))
+    if samples:
+        ncols=4
+        nrows=int(np.ceil(len(samples)/ncols))
+        fig,axes=plt.subplots(nrows,ncols,figsize=(3*ncols,3*nrows))
+        axes=np.atleast_1d(axes).flatten()
+        for i,ax in enumerate(axes):
+            if i >= len(samples):
+                ax.axis('off')
+                continue
+            img_path,label_name,sub=samples[i]
+            img=Image.open(img_path)
             ax.imshow(img)
             ax.axis('off')
-            ax.set_title(f"{row['label_name']} - {sub}",fontsize=9)
+            ax.set_title(f"{label_name} - {sub}",fontsize=9)
             img.close()
-    plt.tight_layout()
-    plt.show(block=True)
+        plt.tight_layout()
+        plt.show(block=True)
 
     # Matriz 4x4: 4 subtipos aleatorios x 4 aumentos
     available_subs=subtypes.copy()

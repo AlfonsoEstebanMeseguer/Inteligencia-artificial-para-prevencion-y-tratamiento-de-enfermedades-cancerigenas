@@ -9,10 +9,13 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, regularizers
 from sklearn.metrics import (confusion_matrix,classification_report,roc_auc_score,average_precision_score)
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
 from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
 from src.config.readDataset import read_binary_breakhis_data
 from src.config.split_dataset import split_by_patient
-from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir
+from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 from src.models.models_definitions import build_cnn_light
 
 # Defaults centralizados para facilitar ajustes rápidos
@@ -37,6 +40,8 @@ if __name__=="__main__" and __package__ is None:
     project_root=Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0,str(project_root))
+else:
+    project_root=Path(__file__).resolve().parents[2]
 
 def parse_arguments():
     """
@@ -72,8 +77,8 @@ def parse_arguments():
 def main():
     # Leer argumentos sin modificar los valores por defecto originales
     args=parse_arguments()
-    model_dir=Path("models")/Path(__file__).stem
-    os.makedirs(model_dir,True)
+    model_dir=project_root/"models"/Path(__file__).stem
+    model_dir.mkdir(parents=True,exist_ok=True)
     # Chequeo de configuraciones y diccionario para construcción de dataset de entrenamiento
     config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
                          ,args.normalization_mode.lower(),SEED,args.use_class_weights
@@ -123,8 +128,13 @@ def main():
                       ,steps_per_epoch=ds_bundle["steps_per_epoch"],validation_steps=ds_bundle["val_steps"]
                       ,class_weight=ds_bundle["class_weights"],callbacks=callbacks,verbose=1)
     
-    run_eval_and_artifacts(model, ds_bundle, threshold=THRESHOLD,conf_path=None,npz_path=None,gradcam_dir=True,last_conv_layer_name="last_conv", save_path=str(model_dir/"cnn_light_breakhis.h5"))
-
+    plot_training_history(history)
+    last_val_metrics={k:v[-1] for k,v in history.history.items() if k.startswith("val_") and v}
+    if last_val_metrics:
+        print("\nMétricas de validación de la última época:")
+        print(json.dumps(last_val_metrics,indent=2))
+    
+    run_eval_and_artifacts(model, ds_bundle, threshold=THRESHOLD,npz_path=None,gradcam_dir=True,last_conv_layer_name="last_conv", save_path=str(model_dir/"cnn_light_breakhis.h5"))
 
 if __name__=="__main__":
     main()

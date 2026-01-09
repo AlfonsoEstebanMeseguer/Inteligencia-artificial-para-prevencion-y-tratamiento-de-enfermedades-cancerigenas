@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import argparse  # Parametrización CLI sin alterar la lógica original
 from datetime import datetime
@@ -7,6 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 from sklearn.utils.class_weight import compute_class_weight
+from pathlib import Path
+
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
+
 from src.config.augmentations import (NONE, LOW, MEDIUM, ADVANCED, EXPERT, apply_augmentations, params)
 from src.config.normalization import (IMAGENET, RESNET, EFFICIENTNET, CUSTOM, STANDARD, normalize_image)
 
