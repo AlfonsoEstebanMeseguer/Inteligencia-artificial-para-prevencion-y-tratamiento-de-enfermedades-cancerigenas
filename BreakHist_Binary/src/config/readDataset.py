@@ -1,6 +1,7 @@
 import os
 import argparse  
 
+"ruta base por defecto del dataset BreakHis (puede ser sobrescrita por variable de entorno BREAKHIS_BASE)"
 DEFAULT_BASE_PATH = os.environ.get("BREAKHIS_BASE",os.path.join(os.getcwd(),"BreakHist_Binary","BreakHist","data"
                                 ,"BreakHis - Breast Cancer Histopathological Database"
                                 ,"dataset_cancer_v1","dataset_cancer_v1","classificacao_binaria"))
@@ -139,7 +140,7 @@ def read_binary_breakhis_data(base_path,verbose=True):
 # Ejemplo de uso: python readDataset.py --base-path "D:\\ruta\\al\\dataset" --no-verbose.
 def parse_arguments():
     parser=argparse.ArgumentParser("Lectura del dataset BreakHis en clasificación binaria.")
-    parser.add_argument("--base-path", default=DEFAULT_BASE_PATH, help="Ruta raíz del dataset BreakHis (por defecto la ruta original del script).")
+    parser.add_argument("--base-path",default=DEFAULT_BASE_PATH,help="Ruta raíz del dataset BreakHis (por defecto la ruta original del script).")
     return parser.parse_args()
 
 def main():

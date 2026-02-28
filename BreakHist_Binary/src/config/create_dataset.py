@@ -9,14 +9,13 @@ import numpy as np
 import tensorflow as tf
 from sklearn.utils.class_weight import compute_class_weight
 from pathlib import Path
-
+from src.config.augmentations import (NONE, LOW, MEDIUM, ADVANCED, EXPERT, apply_augmentations, params)
+from src.config.normalization import (IMAGENET, RESNET, EFFICIENTNET, CUSTOM, STANDARD, normalize_image)
 PROJECT_ROOT=Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0,str(PROJECT_ROOT))
 
-from src.config.augmentations import (NONE, LOW, MEDIUM, ADVANCED, EXPERT, apply_augmentations, params)
-from src.config.normalization import (IMAGENET, RESNET, EFFICIENTNET, CUSTOM, STANDARD, normalize_image)
-
+# Valores por defectoº
 SIZE_DEFAULT = (224,224)
 BUFFER_DEFAULT = 1000
 CACHE_DEFAULT = True
@@ -27,9 +26,7 @@ PREFETCH_DEFAULT = True
 Esta es una función muy sencilla, hace comprobaciones de la configuración solicitada y devuelve un diccionario con la configuración del dataset, listo
 para su construcción. 
 """
-def DatasetConfig(img_size,batch_size,buffer_size,augmentation_level
-                  ,normalization_mode,seed,use_class_weights,cache
-                  ,shuffle_train,prefetch):
+def DatasetConfig(img_size,batch_size,buffer_size,augmentation_level,normalization_mode,seed,use_class_weights,cache,shuffle_train,prefetch):
     # Comprobación de valores encontrados (no hace falta hacer minúsculas, se ahce antes de llamar a la función)
     if augmentation_level not in [NONE,LOW,MEDIUM,ADVANCED,EXPERT]:
         raise ValueError(f"Nivel de augmentación'{augmentation_level}' no válido. Valores permitidos: {NONE}, {LOW}, {MEDIUM}, {ADVANCED}, {EXPERT}")
@@ -184,8 +181,7 @@ def create_dataset(image_paths,labels,training,config):
     paths_ds=tf.data.Dataset.from_tensor_slices(image_paths)
     labels_ds=tf.data.Dataset.from_tensor_slices(labels)
     dataset=tf.data.Dataset.zip((paths_ds, labels_ds))
-    dataset=dataset.map(lambda path,label:(decode_image(path),label),tf.data.AUTOTUNE)
-    # AUTOTUNE: Tensorflow decide automáticamente cuantos hilos usar, para máximo rendimiento.
+    dataset=dataset.map(lambda path,label:(decode_image(path),label),tf.data.AUTOTUNE) # Tensorflow decide automáticamente cuantos hilos usar, para máximo rendimiento.
     dataset=dataset.map(lambda img,label:(preprocess_image(img,training,config),label),tf.data.AUTOTUNE)
     if training and config["shuffle_train"]:
         # buffer size = tamaño de la mezcla, min ( evitar suffles garndes)
@@ -203,7 +199,7 @@ def create_dataset(image_paths,labels,training,config):
 """
 Función para visualizar augmentaciones aplicadas a una imagen dada.
 Muestra la imagen original y varias versiones augmentadas según la configuración dada.
-Guarda la visualización en un archivo PNG con timestamp.
+Guarda la visualización en un archivo PNG.
 """
 def visualize_augmentations(image_path,config,num_samples):
     if not os.path.exists(image_path): # Control de errores por ruta no encontrada
@@ -235,22 +231,20 @@ def visualize_augmentations(image_path,config,num_samples):
 Esta función es la operadora de todo el script, recibe como parámetros un conjunto de valores de configuración, hace/delega a otras funciones para comprobar errores o 
 recomendar parámetros (ej: Expert), imprime parámetros por pantalla y construye todos los conjuntos de datos listos para el entrenamiento.
 """
-def create_breakhis_pipeline(split_dir,img_size,batch_size,buffer_size,augmentation_level
-                             ,normalization_mode,use_class_weights,seed,cache,shuffle_train,prefetch):
+def create_breakhis_pipeline(split_dir,img_size,batch_size,buffer_size,augmentation_level,normalization_mode,use_class_weights,seed,cache,shuffle_train,prefetch):
     # Control por si escribimos Medio o MEdio o algo asi
     level_lower=augmentation_level.lower()
     norm_lower=normalization_mode.lower()
-    config=DatasetConfig(img_size,batch_size,buffer_size,level_lower,norm_lower,seed,use_class_weights
-                         ,cache,shuffle_train,prefetch)
-    print("CONFIGURACIÓN DEL PIPELINE DE DATOS")
+    config=DatasetConfig(img_size,batch_size,buffer_size,level_lower,norm_lower,seed,use_class_weights,cache,shuffle_train,prefetch)
+    # Comprobaciones
     print(f"Tamaño imagen:{img_size}")
     print(f"Batch size:{batch_size}")
     print(f"Augmentación:{level_lower.upper()}")
     print(f"Normalización:{norm_lower.upper()}")
     if use_class_weights:
-        print(f"Pesos de clase:{'Si'}")
+        print(f"Pesos de clase: Si")
     else:
-        print(f"Pesos de clase:{'No'}")
+        print(f"Pesos de clase: No")
     print(f"Semilla:{seed}")
     # Conjuntos de datos listos para el entrenamiento
     datasets,class_weights =create_datasets(split_dir,config)
@@ -301,16 +295,15 @@ if __name__ == "__main__":
     SHUFFLE=args.shuffle_train
     PREFETCH=args.prefetch
     try: 
-        datasets,class_weights=create_breakhis_pipeline(SPLIT_DIR,IMG_SIZE,BATCH_SIZE,BUFFER_SIZE,AUG_LEVEL
-                                                        ,NORM_MODE,USE_CLASS_WEIGHTS,SEED,CACHE,SHUFFLE,PREFETCH)
+        datasets,class_weights=create_breakhis_pipeline(SPLIT_DIR,IMG_SIZE,BATCH_SIZE,BUFFER_SIZE,AUG_LEVEL,NORM_MODE,USE_CLASS_WEIGHTS,SEED,CACHE,SHUFFLE,PREFETCH)
         train_ds=datasets.get("train")
         if train_ds: 
             print("\nDebug para primer batch de entrenamiento:")
             for images,labels in train_ds.take(1):
-                print(f"Forma imágenes: {images.shape}")
-                print(f"Rango imágenes: [{tf.reduce_min(images):.3f},{tf.reduce_max(images):.3f}]")
-                print(f"Labels (primeros 5): {labels.numpy()[:5]}")
-                print(f"Distribución labels: {np.unique(labels.numpy(),True)}")
+                print(f"Forma imágenes:{images.shape}")
+                print(f"Rango imágenes:[{tf.reduce_min(images):.3f},{tf.reduce_max(images):.3f}]")
+                print(f"Labels (primeros 5):{labels.numpy()[:5]}")
+                print(f"Distribución labels:{np.unique(labels.numpy(),True)}")
 
         if class_weights: # Si aplicamos class_weights
             print("\nPesos de clase para training:")
@@ -320,11 +313,10 @@ if __name__ == "__main__":
                 else:
                     print(f"Maligno:peso={weight:.3f}")
 
-        # Visualización de augmentaciones (solo si existe carpeta split y alguna imagen .png)
+        # Visualización de augmentaciones
         example_images=glob.glob(os.path.join(SPLIT_DIR,"*.png"))
         if example_images:
-            viz_config=DatasetConfig(IMG_SIZE,BATCH_SIZE,BUFFER_SIZE,AUG_LEVEL,NORM_MODE,SEED
-                                     ,USE_CLASS_WEIGHTS,CACHE,SHUFFLE,PREFETCH)
+            viz_config=DatasetConfig(IMG_SIZE,BATCH_SIZE,BUFFER_SIZE,AUG_LEVEL,NORM_MODE,SEED,USE_CLASS_WEIGHTS,CACHE,SHUFFLE,PREFETCH)
             visualize_augmentations(example_images[0],viz_config,5)
 
     except Exception as e:

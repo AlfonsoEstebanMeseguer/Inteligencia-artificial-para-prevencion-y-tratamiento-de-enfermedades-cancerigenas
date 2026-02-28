@@ -11,21 +11,21 @@ from BreakHist_Multiclass.config.readDataset import read_multiclass_breakhis_dat
 from BreakHist_Multiclass.config.create_dataset import load_split as load_split_multiclass,create_dataset as create_dataset_multiclass,compute_class_weights as compute_class_weights_multiclass
 
 """
-Esta función se encarga únicamente de crear cualquier.json que pueda faltar tras split. Simplemente ofrece mayor eficacia al programa en caso de que borremos los scripts
-previamente al entrenamiento
+Función que garantiza la existencia de splits en la ruta dada, con el modo y tipo de dataset solicitados. 
+Si falta algún split o si las rutas dentro de los splits no son válidas, se regeneran completamente a partir del dataset original. 
+Además, si se solicita cobertura de clases en multiclase, se valida que cada split contenga al menos una muestra de cada clase 
+(solo en modo paciente, ya que en modo imagen es más difícil garantizarlo sin fuga). 
+Esto asegura que el pipeline de entrenamiento siempre tenga datos válidos y completos para funcionar correctamente.
 """
-def resolve_dataset_helpers(dataset_type):
-    if dataset_type=="binary":
-        return (read_binary_breakhis_data, split_by_patient_shared, split_by_image_shared,
-                load_split_binary, create_dataset_binary, compute_class_weights_binary)
-    if dataset_type=="multiclass":
-        return (read_multiclass_breakhis_data, split_by_patient_shared, split_by_image_shared,
-                load_split_multiclass, create_dataset_multiclass, compute_class_weights_multiclass)
-    raise ValueError(f"Tipo de dataset no soportado: {dataset_type}")
-
-def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,split_mode="patient",dataset_type="binary",random_state=None):
+def ensure_splits(base_path,split_dir,train_size,val_size,test_size,split_mode,dataset_type,random_state,ensure_all_classes):
+    if random_state is None:
+        random_state=42 #seed reproducible 
     # Normalizamos la carpeta de splits según el modo solicitado solo si aún no incluye el sufijo esperado.
-    target_suffix="split_patient" if split_mode=="patient" else "split_imagen"
+    if split_mode=="patient": 
+        target_suffix="split_patient" 
+    else:
+        target_suffix="split_imagen"
+    # gestión de rutas
     if Path(split_dir).name != target_suffix:
         split_dir=resolve_split_dir(split_dir,split_mode)
     read_data,split_by_patient_fn,split_by_image_fn,_,_,_= resolve_dataset_helpers(dataset_type)
@@ -33,14 +33,14 @@ def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,
     for s in ["train","val","test"]:
         split_path=os.path.join(split_dir,f"{s}.json")
         if not os.path.exists(split_path):
-            missing.append(split_path)
+            missing.append(split_path) # agregamos split no encontrado
 
     regenerate=False
     if missing:
         regenerate=True
         print(f"Faltan splits, se regenerarán: {', '.join(missing)}")
     else:
-        # Validamos que las rutas existentes realmente existen (evita rutas obsoletas)
+        # Validamos rutas existentes r
         for s in ["train","val","test"]:
             split_path=os.path.join(split_dir,f"{s}.json")
             try:
@@ -59,13 +59,37 @@ def ensure_splits(base_path,split_dir,train_size=0.8,val_size=0.1,test_size=0.1,
                 regenerate=True
                 break
 
+    # Si se solicita cobertura de clases en multiclase, comprobamos los splits existentes.
+    if not regenerate and ensure_all_classes and dataset_type=="multiclass" and split_mode=="patient":
+        try:
+            _,_,_,label_map,_=read_data(base_path,verbose=False)
+            expected_classes=set(label_map.values())
+        except Exception as e:
+            print(f"No se pudo cargar label_map para validar clases: {e}")
+            expected_classes=None
+        coverages={}
+        for s in ["train","val","test"]:
+            split_path=os.path.join(split_dir,f"{s}.json")
+            try:
+                with open(split_path,"r",encoding="utf-8") as f:
+                    data=json.load(f)
+                coverages[s]=set(int(x) for x in data.get("labels",[]))
+            except Exception as e:
+                print(f"No se pudo validar cobertura en {split_path}: {e}")
+                regenerate=True
+                break
+        if not regenerate and coverages:
+            if expected_classes is None:
+                expected_classes=set().union(*coverages.values())
+            missing_per_split={s:sorted(list(expected_classes-coverages[s])) for s in coverages if expected_classes-coverages[s]}
+            if missing_per_split:
+                print(f"Faltan clases en splits ({missing_per_split}). Se regenerarán.")
+                regenerate=True
+
     if regenerate:
         # Preparamos carpeta y leemos dataset completo para dividir
         os.makedirs(split_dir,exist_ok=True)
-        if dataset_type=="multiclass":
-            _,all_images,all_labels,label_map,slides=read_data(base_path,verbose=False)
-        else:
-            _,all_images,all_labels,label_map,slides=read_data(base_path,verbose=False)
+        _,all_images,all_labels,label_map,slides=read_data(base_path,verbose=False) 
         if split_mode=="patient":
             # Split estratificado por paciente (sin fuga)
             if dataset_type=="multiclass":
@@ -103,6 +127,20 @@ def resolve_split_dir(split_dir,split_mode):
     return str(base/target)
 
 """
+Esta función devuelve un conjunto de funciones específicas para el tipo de dataset solicitado (binario o multiclase). 
+Esto permite que el resto del pipeline pueda usar funciones genéricas sin preocuparse por las diferencias entre tipos de 
+dataset, ya que cada función se adapta internamente a las necesidades de su tipo específico.
+"""
+def resolve_dataset_helpers(dataset_type):
+    if dataset_type=="binary":
+        return (read_binary_breakhis_data, split_by_patient_shared, split_by_image_shared,
+                load_split_binary, create_dataset_binary, compute_class_weights_binary)
+    if dataset_type=="multiclass":
+        return (read_multiclass_breakhis_data, split_by_patient_shared, split_by_image_shared,
+                load_split_multiclass, create_dataset_multiclass, compute_class_weights_multiclass)
+    raise ValueError(f"Tipo de dataset no soportado: {dataset_type}")
+
+"""
 Esta función crea datasets tf.data listos para model.fit con steps calculados. Obtiene los datos listos para tesorflow (imagenes, labels), con ellos crea los datasets,
 calcula los steps con: ceil(redondeo hacia arriba) y NO división exacta (porque que, por ejemplo para 100 imágenes y tamaño de batch 32, habrían 3,125 pasos, que hacemos con el último?
 , si no redondeamos hacia arriba, estaremos perdiendo imágenes por cada step, por ello forzamos a usar más num steps antes que menos).
@@ -112,21 +150,31 @@ las imágenes, incluso si el batch es incompleto.
 
 Tras obtener los datasets, los steps y los pesos (si procede), devuelve un diccionario con la información de configuración lista para entrenamiento.
 """
-def get_datasets_basic(config,split_dir,include_labels=False,dataset_type="binary"):
+def get_datasets_basic(config,split_dir,include_labels,dataset_type):
     _,_,_,load_split_fn,create_dataset_fn,compute_class_weights_fn=resolve_dataset_helpers(dataset_type)
     train_imgs,train_labels=load_split_fn(split_dir,"train")
     val_imgs,val_labels=load_split_fn(split_dir,"val")
     test_imgs,test_labels=load_split_fn(split_dir,"test")
+    # check rapido para binario, solo etiquetas 0,1
+    if dataset_type=="binary":
+        all_labels=train_labels+val_labels+test_labels
+        unique_labels=[]
+        for x in all_labels:
+            x=int(x) # aseguramos entero
+            if x not in unique_labels:
+                unique_labels.append(x)
+        invalid_labels=[]
+        for x in unique_labels: #chequeamos que solo haya 0 y 1, si hay algo más, error
+            if x!=0 and x!=1:
+                invalid_labels.append(x)
+        if invalid_labels:
+            raise ValueError(f"Labels no binarios detectados en splits: {sorted(invalid_labels)}. "f"Usa splits binarios o el pipeline multiclase.")
     if len(train_imgs)==0 or len(val_imgs)==0 or len(test_imgs)==0:
         raise RuntimeError("Algún split está vacío")
-    if dataset_type=="multiclass":
-        train_ds=create_dataset_fn(train_imgs,train_labels,training=True,config=config)
-        val_ds=create_dataset_fn(val_imgs,val_labels,training=False,config=config)
-        test_ds=create_dataset_fn(test_imgs,test_labels,training=False,config=config)
-    else:
-        train_ds=create_dataset_fn(train_imgs,train_labels,True,config)
-        val_ds=create_dataset_fn(val_imgs,val_labels,False,config)
-        test_ds=create_dataset_fn(test_imgs,test_labels,False,config)
+
+    train_ds=create_dataset_fn(train_imgs,train_labels,True,config)
+    val_ds=create_dataset_fn(val_imgs,val_labels,False,config)
+    test_ds=create_dataset_fn(test_imgs,test_labels,False,config)
     steps_per_epoch=math.ceil(len(train_imgs)/config["batch_size"])
     val_steps=math.ceil(len(val_imgs)/config["batch_size"])
     test_steps=math.ceil(len(test_imgs)/config["batch_size"])
@@ -135,28 +183,48 @@ def get_datasets_basic(config,split_dir,include_labels=False,dataset_type="binar
     else:
         class_weights=None
     num_classes=int(np.max(train_labels))+1
-    out={"config":config,"train_ds":train_ds,"val_ds":val_ds,"test_ds":test_ds,"steps_per_epoch":steps_per_epoch,
-         "val_steps":val_steps,"test_steps":test_steps,"class_weights":class_weights,"test_imgs":test_imgs,
-         "test_labels":test_labels,"num_classes":num_classes}
+    out={"config":config,"train_ds":train_ds,"val_ds":val_ds,"test_ds":test_ds,"steps_per_epoch":steps_per_epoch
+         ,"val_steps":val_steps,"test_steps":test_steps,"class_weights":class_weights,"test_imgs":test_imgs
+         ,"test_labels":test_labels,"num_classes":num_classes}
     if include_labels:
         out.update({"train_labels":np.array(train_labels,dtype=np.int32),"val_labels":np.array(val_labels,dtype=np.int32),"test_labels":np.array(test_labels,dtype=np.int32)})
     return out
 
-def plot_training_history(history, metrics=None, save_path=None, show=True):
-    history_dict=getattr(history,"history",history)
+
+"""
+Función que plotea gráficas del entrenamiento .Cada métrica de train se muestra con una línea para el entrenamiento y una 
+línea discontinua para la validación, usando el mismo color para ambas. Además, se se plotea tambiñén una leyendapara mejorar la legibilidad.
+"""
+def plot_training_history(history,metrics,save_path,show):
+    # history de Keras o diccionario con métricas por epoch
+    if hasattr(history,"history"):
+        history_dict=history.history
+    else:
+        history_dict=history
     if metrics is None:
-        metrics=[m for m in history_dict.keys() if not m.startswith("val_")]
-    metrics=[m for m in metrics if m in history_dict]
-    if not metrics:
+        # Si no se especifican métricas, usamos las de entrenamiento 
+        metrics=[]
+        for m in history_dict.keys():
+            if not m.startswith("val_"):
+                metrics.append(m)
+    # Filtramos métricas que existan en el historial
+    filtered_metrics=[]
+    for m in metrics:
+        if m in history_dict:
+            filtered_metrics.append(m)
+    metrics=filtered_metrics
+    if len(metrics)==0:
         print("No hay métricas para graficar.")
         return None
     fig,ax=plt.subplots(figsize=(10,5))
     color_cycle=plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for idx,metric in enumerate(metrics):
         color=color_cycle[idx % len(color_cycle)]
+        # Curva de entrenamiento
         ax.plot(history_dict[metric],label=f"train_{metric}",color=color,linestyle="-")
         val_key=f"val_{metric}"
         if val_key in history_dict:
+            # Curva de validación
             ax.plot(history_dict[val_key],label=val_key,color=color,linestyle="--")
     ax.set_title("Curvas de entrenamiento")
     ax.set_xlabel("Epoch")
@@ -175,7 +243,7 @@ def plot_training_history(history, metrics=None, save_path=None, show=True):
 
 
 """
-Función que evalúa en test y devuelve métricas y predicciones. Obtenemos todo test y comprobamos predicción del modelo ya entrenado con 'predict' donde
+Función que evalúa en test y devuelve métricas y predicciones. Obtenemos todo test y comprobamos predicción del modelo ya entrenado con predict donde
 y_true es la lista de valores reales y y_prob la lista de valores predecidos, calculamos la matriz de confusión y el reporte de clasificación proporcionados por
 skearn-metrics con métricas:
 Accuracy: Porcentaje de predicciones correctas (medida global de rendimiento). Problema: engañosa con datos desbalanceados.
@@ -187,7 +255,7 @@ PR-AUC:Evalúa modelos con clases desbalanceadas (compromiso entre precision/sen
 Specificity: Proporción de casos correctamente clasificados(Controlar falsos positivos) -> util para no alarmar a pacientes sanos
 Sensitivity: Detecta  el máximo número de cánceres
 """
-def evaluate_binary(model,test_ds,test_steps,threshold):
+def evaluate_binary(model,test_ds,test_steps):
     y_true=[]
     y_prob=[]
     y_pred=[]
@@ -197,16 +265,11 @@ def evaluate_binary(model,test_ds,test_steps,threshold):
         y_prob.append(preds)
     y_true=np.concatenate(y_true)
     y_prob=np.concatenate(y_prob)
-    """
-    COMPROBACIÓN POSIBLMENENTE REDUDANTE:
-        # Forzamos etiquetas binarias ante cualquier valor extraño
-        y_true = (y_true > 0).astype(np.int32)
-        # Limpieza de valores inválidos
-        y_prob=np.nan_to_num(y_prob,nan=0.0,posinf=1.0,neginf=0.0)
-        y_prob=np.clip(y_prob,0.0,1.0)
-    """
+    unique_labels=np.unique(y_true)
+    if len(unique_labels) > 2:
+        raise ValueError(f"evaluate_binary recibió etiquetas multiclase: {unique_labels}. "f"Usa el pipeline multiclase o splits binarios.")
     for prob in y_prob:
-        if prob >= threshold:
+        if prob >= 0.5:
             y_pred.append(1)
         else:
             y_pred.append(0)
@@ -220,12 +283,13 @@ def evaluate_binary(model,test_ds,test_steps,threshold):
                ,"f1":rep["weighted avg"]["f1-score"],"roc_auc":roc_auc,"pr_auc":pr_auc
                ,"specificity":cm[0,0]/(cm[0,0]+cm[0,1]+1e-8),"sensitivity":cm[1,1]/(cm[1,1]+cm[1,0]+1e-8)}
     
-    return metrics, cm, y_true, y_prob, y_pred
+    return metrics,cm,y_true,y_prob,y_pred
 
 """
-Función que guarda matriz de confusión. 
+Función que plotea la matriz de confusión (escala de azules). Esta visualización facilita la interpretación de los resultados del modelo, 
+mostrando claramente las verdaderas positivas, verdaderas negativas, falsas positivas y falsas negativas.
 """
-def plot_confusion_matrix(cm,labels=("Benign","Malignant")):
+def plot_confusion_matrix(cm,labels):
     # cm -> matriz de confusión
     fig,ax=plt.subplots(figsize=(4, 4)) # figura tamaño 4x4
     im=ax.imshow(cm,cmap="Blues") # visualizamos matriz como imagen, mapa de color en escala de azules
@@ -250,26 +314,104 @@ def plot_confusion_matrix(cm,labels=("Benign","Malignant")):
     return fig
 
 """
+Función que plotea métricas finales en un gráfico de barras y devuelve un diccionario con todas las métricas calculadas,
+la matriz de confusión y el reporte de clasificación.
+"""
+def plot_metrics_bar(metrics,title,figsize,show):
+    # Solo métricas numéricas
+    keys=[]
+    for k in metrics:
+        v=metrics[k]
+        if isinstance(v,(int,float)):
+            keys.append(k)
+    if len(keys)==0:
+        print("No hay métricas numéricas para graficar.")
+        return None
+    values=[]
+    for k in keys:
+        values.append(float(metrics[k]))
+    fig,ax=plt.subplots(figsize=figsize)
+    x=np.arange(len(keys))
+    bars=ax.bar(x,values,color="steelblue",edgecolor="black")
+    ax.set_title(title)
+    ax.set_ylabel("Valor")
+    ax.set_xticks(x)
+    ax.set_xticklabels(keys,rotation=45,ha="right")
+    ax.grid(True,axis="y",alpha=0.3)
+    i=0
+    for bar in bars:
+        h=bar.get_height()
+        offset=0.01
+        if h*0.02 > offset:
+            offset=h*0.02
+        ax.text(bar.get_x()+bar.get_width()/2,h+offset,f"{values[i]:.3f}",ha="center",va="bottom",fontsize=8)
+        i+=1
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+"""
 Función que genera heatmap Grad-CAM para una imagen preprocesada. Lo primero es construir un modelo que devuelva la predicción final del modelo, (model.output)
 y la última capa convolucional del modelo en cuestión. Este modelo es necesario pues necesitamos la predicción real (no la aproximada por alguna entropía o modificación
 , ej sigmoide o binarycrossentropy), es decir, el valor real predicho por la última capa convolucional. Y, necesitamos el resultado final del modelo, para calcular gradientes de 
 calor-frio. Usamos GradientTape, proporcionado por tensorflow para registrar todos los cálculos realizados en una cinta, que se usará para la representación. De seguido,
 """
-def find_layer_recursive(model, layer_name):
-    """Busca una capa por nombre, devolviendo (layer, parent_model) si se encuentra."""
-    for layer in model.layers:
-        if layer.name==layer_name:
-            return layer, model
-        if isinstance(layer, tf.keras.Model) and hasattr(layer, "layers"):
-            found=find_layer_recursive(layer,layer_name)
-            if found[0] is not None:
-                return found
-    return None, None
-
-def make_gradcam_heatmap(model, img_array,last_conv_layer_name):
-    target_layer,parent_model=find_layer_recursive(model,last_conv_layer_name)
+def make_gradcam_heatmap(model, img_array,last_conv_layer_name,target_class):
+    if last_conv_layer_name in (None, "auto"):
+        # Elige la Conv2D con mayor varianza de activación para evitar mapas planos.
+        conv_layers=[layer for layer in model.layers if isinstance(layer, tf.keras.layers.Conv2D)]
+        if not conv_layers:
+            target_layer,parent_model=None,None
+        else:
+            outputs=[layer.output for layer in conv_layers]
+            probe=tf.keras.models.Model(model.input,outputs)
+            acts=probe(img_array,training=False)
+            best_idx=0
+            best_score=-1.0
+            for i,act in enumerate(acts):
+                # Varianza global + tamaño espacial (favorece mapas menos genéricos)
+                h,w=int(act.shape[1]),int(act.shape[2])
+                score=float(tf.math.reduce_std(act).numpy()) * max(h*w,1)
+                if score > best_score:
+                    best_score=score
+                    best_idx=i
+            target_layer,parent_model=conv_layers[best_idx],model
+    else:
+        # Busca una capa por nombre en el modelo (incluye modelos anidados).
+        target_layer=None
+        parent_model=None
+        stack=[model]
+        while stack and target_layer is None:
+            current=stack.pop()
+            for layer in current.layers:
+                if layer.name==last_conv_layer_name:
+                    target_layer=layer
+                    parent_model=current
+                    break
+                if isinstance(layer, tf.keras.Model) and hasattr(layer, "layers"):
+                    stack.append(layer)
     if target_layer is None:
-        raise ValueError(f"No se encontró la capa {last_conv_layer_name} en el modelo para Grad-CAM.")
+        # Fallback: elige la conv con mayor varianza de activación
+        conv_layers=[layer for layer in model.layers if isinstance(layer, tf.keras.layers.Conv2D)]
+        if not conv_layers:
+            target_layer,parent_model=None,None
+        else:
+            outputs=[layer.output for layer in conv_layers]
+            probe=tf.keras.models.Model(model.input,outputs)
+            acts=probe(img_array,training=False)
+            best_idx=0
+            best_score=-1.0
+            for i,act in enumerate(acts):
+                # Varianza global + tamaño espacial (favorece mapas menos genéricos)
+                h,w=int(act.shape[1]),int(act.shape[2])
+                score=float(tf.math.reduce_std(act).numpy()) * max(h*w,1)
+                if score > best_score:
+                    best_score=score
+                    best_idx=i
+            target_layer,parent_model=conv_layers[best_idx],model
+        if target_layer is None:
+            raise ValueError(f"No se encontró la capa {last_conv_layer_name} en el modelo para Grad-CAM.")
     # Si la capa está en un modelo anidado (p.ej. resnet50), necesitamos reencaminar al input del modelo principal
     if parent_model is model:
         target_tensor=target_layer.output
@@ -279,10 +421,10 @@ def make_gradcam_heatmap(model, img_array,last_conv_layer_name):
     grad_model=tf.keras.models.Model(model.input,[target_tensor,model.output])
     with tf.GradientTape() as tape:
         conv_outputs,predictions=grad_model(img_array) # salidas de la última capa conv y pred final
-        loss_vals=[]
-        for pred in predictions:  # recorre el batch
-            loss_vals.append(pred[0]) 
-        loss=tf.stack(loss_vals)
+        p=predictions[:,0]
+        # Logit para evitar saturación de la sigmoide en gradientes
+        logit=tf.math.log(p+1e-7) - tf.math.log(1.0-p+1e-7)
+        loss=logit if target_class==1 else -logit
         """
         grads es el valor de la sensibilidad de cada filtro de los de la última capa de convolución 
         pooled graps es la agrupación de la media de cada filtro:
@@ -300,20 +442,26 @@ def make_gradcam_heatmap(model, img_array,last_conv_layer_name):
     por su peso, es como bajar la opacidad en una imagen o cuando hacemos máscaras 
     """
     heatmap=tf.reduce_sum(tf.multiply(pooled_grads,conv_outputs),axis=-1)
-    # Elimino valores negativos, porque solo buscamos regiones cercanas, no regiones leganas, no normalizamos 0-1 y evitamos que se divida por 0 con 1e-8
-    heatmap=tf.maximum(heatmap,0)/(tf.reduce_max(heatmap)+1e-8) # aqui se normaliza, por eso en show_gradcam desnormalizamos
-    return heatmap.numpy() #convertimos a numpy poder representarlo con opencv
+    # Elimino valores negativos
+    heatmap=tf.maximum(heatmap,0)
+    heatmap=heatmap.numpy()
+    # Normalización robusta por percentiles (evita "todo rojo")
+    p_low=np.percentile(heatmap,20)
+    p_high=np.percentile(heatmap,99)
+    if p_high <= p_low:
+        denom=(np.max(heatmap)-np.min(heatmap))+1e-8
+        heatmap=(heatmap-np.min(heatmap))/denom
+    else:
+        heatmap=np.clip((heatmap-p_low)/(p_high-p_low+1e-8),0,1)
+    # Gamma para realzar contraste local
+    heatmap=np.power(heatmap,1.2)
+    return heatmap
 
 """
-Función que muestra un overlay Grad-CAM para una imagen dada. Antes guardábamos 3 tipos de imágenes (original, heatmap y overlay); ahora solo las mostramos.
+Función que plotea un Grad-CAM para una imagen dada, mostrando la imagen original junto al heatmap. 
+Permite forzar una clase objetivo específica o usar la predicción del modelo para decidirla.
 """
-def label_to_text(label):
-    try:
-        return "malignant" if int(label)==1 else "benign"
-    except Exception:
-        return str(label)
-
-def show_gradcam_example(model,config,image_path,last_conv_layer_name,label=None,threshold=0.5):
+def show_gradcam_example(model,config,image_path,last_conv_layer_name,label,force_target_class):
     # Sabemos que vamos a trabajar con imágenes, por ello debemos convertirlas de tensores a imágenes,
     # hacemos lo mismo que en la función decode_image de create dataset
     img_decoded=decode_image(tf.constant(image_path))
@@ -322,76 +470,166 @@ def show_gradcam_example(model,config,image_path,last_conv_layer_name,label=None
     #El overlay debe hacerse sobre valores de imagen reales, no normalizados.
     img_array=tf.expand_dims(img,axis=0) # expandimos a una columna para inferir con grdacam, recordemos que en la función de 
     # make_gradcam_heatmap se toman 4 dimensiones (1,H,W,C) pero aqui de primeras tenemos (H,W,C) tras decodificar y procesasr.
-    heatmap=make_gradcam_heatmap(model,img_array,last_conv_layer_name)
+    # Predicción para decidir la clase objetivo del Grad-CAM
+    pred_prob=float(model.predict(img_array,verbose=0).ravel()[0])
+    if force_target_class is None:
+        if label is not None:
+            target_class=int(label) # aseguramos entero
+        else: 
+            if pred_prob>=0.5: # si la probabilidad de maligno es >=0.5, se considera maligno, si no benigno, 
+                #sabemos que la salida del modelo puede no ser exactamente 0 o 1, sino un valor continuo entre ambos, por ello el umbral de 0.5 para decidir la clase objetivo del Grad-CAM
+                target_class=1 
+            else:
+                target_class=0
+    else:
+        target_class=int(force_target_class)
+    heatmap=make_gradcam_heatmap(model,img_array,last_conv_layer_name,target_class=target_class)
     heatmap=np.uint8(255*heatmap) # Desnormalizamos -> se normalizó en make_gradcam_heatmap
     heatmap=np.expand_dims(heatmap,axis=-1) #make_graccam_heatmap devuelve 2 dimensiones (Wc,Wc), expando a (Hc,Wc,1) para operaciones como resize (no permite con 2 dimnensiones)
     heatmap=tf.image.resize(heatmap,config["img_size"]).numpy().astype(np.uint8)
     # Muy importante ya que en Grad-CAM se calcula a resolución de la capa convolucional, aqui devolvemos la dimensiíon orignial
     # Predicción para mostrar en la cabecera
-    pred_prob=float(model.predict(img_array,verbose=0).ravel()[0])
-    pred_label=1 if pred_prob>=threshold else 0
+    pred_label=target_class
     fig,axes=plt.subplots(1,2,figsize=(8,4)) # original y heatmap
     axes[0].imshow(img_decoded)
     if label is not None:
-        axes[0].set_title(f"Original (label: {label_to_text(label)})")
+        try:
+            if int(label)==1:
+                label_text="malignant" 
+            else :
+                label_text="benign"
+        except Exception:
+            label_text=str(label)
+        axes[0].set_title(f"Original (label: {label_text})")
     else:
         axes[0].set_title("Original")
     axes[0].axis("off")
     axes[1].imshow(heatmap[..., 0],cmap="jet") # jet -> azul baja importancia, rojo alta importancia
-    axes[1].set_title(f"Heatmap (pred: {label_to_text(pred_label)} | p={pred_prob:.2f})")
+    if int(pred_label)==1:
+        pred_text="malignant"
+    else:
+        pred_text="benign"
+    axes[1].set_title(f"Heatmap (pred: {pred_text})")
     axes[1].axis("off")
     plt.tight_layout() # evitamos cortar textos 
     plt.show()
     return fig
 
 """
-Función que se encarga de evaluar e imprimir cualquier métrica o representación adecuada para el análisis del modelo. 
-Muestra la matriz de confusión y Grad-CAMs en pantalla; no guarda imágenes.
+Función que ejecuta la evaluación completa en test, incluyendo métricas, matriz de confusión, reporte de clasificación y Grad-CAM. 
+Permite permite guardar el modelo si se especifica una ruta.  Se muestran los mejores ejemplos para Grad-CAM según confianza, 
+o una lista fija si se proporciona. Se maneja cualquier error en la generación de Grad-CAM para asegurar que la evaluación no se interrumpa.
 """
-def run_eval_and_artifacts(model,ds_bundle,threshold,npz_path=None,gradcam_dir=None,last_conv_layer_name=None,save_path=None,prefix="TEST"):
+def run_eval_and_artifacts(model,ds_bundle,gradcam_dir,last_conv_layer_name,save_path,prefix,force_target_class):
     print(f"\nEvaluación en {prefix}:")
+    # Evaluación sobre el dataset de test 
     model.evaluate(ds_bundle["test_ds"],steps=ds_bundle["test_steps"], verbose=2)
-    metrics,cm,y_true,y_prob,y_pred=evaluate_binary(model,ds_bundle["test_ds"],ds_bundle["test_steps"],threshold)
+    # Métricas y predicciones en bruto 
+    metrics,cm,y_true,y_prob,y_pred=evaluate_binary(model,ds_bundle["test_ds"],ds_bundle["test_steps"])
     print("\nMétricas finales:",json.dumps(metrics,indent=2))
     print(classification_report(y_true,y_pred,target_names=["benign","malignant"]))
-    plot_confusion_matrix(cm)
-    if npz_path:
-        os.makedirs(os.path.dirname(npz_path),exist_ok=True)
-        np.savez(npz_path,y_true=y_true,y_prob=y_prob,y_pred=y_pred,threshold=threshold)
-        print(f"Probabilidades y etiquetas guardadas en {npz_path}")
+    plot_confusion_matrix(cm,("Benign","Malignant"))
+    plot_metrics_bar(metrics,title=f"Métricas finales ({prefix})",figsize=(12,4),show=True)
     if gradcam_dir:
         sample_paths=ds_bundle["test_imgs"]
+        #Si no existen todos los labels see rellenan con None
         sample_labels=ds_bundle.get("test_labels",[None]*len(sample_paths))
-        n_samples=min(3,len(sample_paths))
-        if n_samples==0:
+        gradcam_fixed_path=Path(ds_bundle["config"].get("gradcam_fixed_path",""))
+        fixed_active=False
+        if gradcam_fixed_path and gradcam_fixed_path.exists():
+            try:
+                with open(gradcam_fixed_path,"r",encoding="utf-8") as f:
+                    fixed=json.load(f)
+                fixed_paths=fixed.get("images",[])
+                fixed_labels=fixed.get("labels",[])
+                if fixed_paths:
+                    # Si hay lista fija, se prioriza frente a muestreo por confianza
+                    sample_paths=fixed_paths
+                    if fixed_labels:
+                        sample_labels=fixed_labels
+                    else:
+                        sample_labels=[None]*len(sample_paths)
+                    fixed_active=True
+            except Exception as e:
+                print(f"No se pudo cargar gradcam_fixed: {e}")
+        if len(sample_paths)==0:
             print("No hay imágenes de test para Grad-CAM.")
         else:
-            rng=np.random.default_rng()
-            selected_idx=rng.choice(len(sample_paths),size=n_samples,replace=False)
-            for i,idx in enumerate(selected_idx,1):
-                img_path=sample_paths[idx]
-                label=sample_labels[idx] if idx < len(sample_labels) else None
-                try:
-                    show_gradcam_example(model,ds_bundle["config"],img_path,last_conv_layer_name,label=label,threshold=threshold)
-                except Exception:
-                    print("No se pudo generar Grad-CAM")
-                    print(traceback.format_exc())
+            # En caso de que queramos comparar las mismas imagenes con distintos modelos, pasaremos la lista de imagenes iguales
+            if fixed_active:
+                selected=list(range(len(sample_paths)))
+            else:
+                # Si no buscamos mejores candidatos por clase, se toman las primeras 6 imágenes 
+                # (4 benignas y 2 malignas) para mostrar variedad sin sesgo de confianza.
+                benign_candidates=[]
+                malignant_candidates=[]
+                for idx,prob in enumerate(y_prob):
+                    # si probabilidad de maligno es >=0.5, se considera maligno, si no benigno
+                    if prob>=0.5:
+                        pred_label=1
+                    else:
+                        pred_label=0
+                    if pred_label==0:
+                        benign_candidates.append((idx,1.0-prob))
+                    else:
+                        malignant_candidates.append((idx,prob))
+                # Elegimos ejemplos mejor predichos por clase
+                top_benign=[]
+                for cand in benign_candidates:
+                    inserted=False
+                    i=0
+                    while i < len(top_benign):
+                        if cand[1] > top_benign[i][1]:
+                            top_benign.insert(i,cand)
+                            inserted=True
+                            break
+                        i+=1
+                    if not inserted:
+                        top_benign.append(cand)
+                    while len(top_benign) > 4:
+                        top_benign.pop()
+                top_malignant=[]
+                for cand in malignant_candidates:
+                    inserted=False
+                    i=0
+                    while i < len(top_malignant):
+                        if cand[1] > top_malignant[i][1]:
+                            top_malignant.insert(i,cand)
+                            inserted=True
+                            break
+                        i+=1
+                    if not inserted:
+                        top_malignant.append(cand)
+                    while len(top_malignant) > 2:
+                        top_malignant.pop()
+                selected=top_benign+top_malignant
+            if not selected:
+                print("No hay predicciones para Grad-CAM.")
+            else:
+                for rank,item in enumerate(selected,1):
+                    if fixed_active: # si hay lista fija, el item es directamente el índice, si no, el item es una tupla 
+                        # (índice, confianza de preddct)
+                        idx=item
+                    else:
+                        idx,_=item
+                    img_path=sample_paths[idx]
+                    if idx < len(sample_labels):
+                        label=sample_labels[idx]
+                    else:
+                        label=None
+                    try:
+                        # Grad-CAM puede fallar si no encuentra la capa (ya que tenemos muchos modelos posibles), 
+                        # o por cualquier otro motivo, por ello lo envolvemos en un try-except para asegurar que el proceso de evaluación no se interrumpa.
+                        show_gradcam_example(model,ds_bundle["config"],img_path,last_conv_layer_name,label=label,force_target_class=force_target_class)
+                    except Exception:
+                        print("No se pudo generar Grad-CAM")
+                        print(traceback.format_exc())
     if save_path:
         os.makedirs(os.path.dirname(save_path),exist_ok=True)
-        # Permite guardar sólo pesos si se pasa un nombre de archivo de pesos
+        # guardar sólo pesos si se pasa un nombre de archivo de pesos
         if str(save_path).endswith(".weights.h5"):
             model.save_weights(save_path)
         else:
             model.save(save_path)
         print(f"Modelo guardado en {save_path}")
     return metrics,cm,y_true,y_prob,y_pred
-
-def focal_loss(y_true,y_pred,alpha=0.25,gamma=2.0,label_smoothing=0.05):
-    y_true=tf.cast(y_true,tf.float32)
-    y_pred=tf.clip_by_value(tf.cast(y_pred,tf.float32),1e-7,1.0-1e-7)
-    if label_smoothing>0:
-        y_true=y_true*(1.0-label_smoothing)+0.5*label_smoothing
-    p_t=y_true*y_pred+(1.0-y_true)*(1.0-y_pred)
-    alpha_t=y_true*alpha+(1.0-y_true)*(1.0-alpha)
-    loss=-alpha_t*tf.pow(1.0-p_t,gamma)*tf.math.log(p_t)
-    return tf.reduce_mean(loss)

@@ -9,32 +9,16 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, regularizers
 from sklearn.metrics import (confusion_matrix,classification_report,roc_auc_score,average_precision_score)
-PROJECT_ROOT=Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0,str(PROJECT_ROOT))
 from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
 from src.config.readDataset import read_binary_breakhis_data
 from src.config.split_dataset import split_by_patient
 from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 from src.models.models_definitions import build_cnn_light
 
-# Defaults centralizados para facilitar ajustes rápidos
-EPOCHS_DEFAULT=40
-LR_DEFAULT=1e-3
-IMG_SIZE_DEFAULT=[224,224]
-BATCH_SIZE_DEFAULT=32
-AUG_LEVEL_DEFAULT="medium"
-NORM_MODE_DEFAULT="imagenet"
-USE_CLASS_WEIGHTS_DEFAULT=True
-TRAIN_SIZE_DEFAULT=0.8
-VAL_SIZE_DEFAULT=0.1
-TEST_SIZE_DEFAULT=0.1
-SEED=42
-PATIENTE_STOPPING=8
-PATIENTE_RL=4
-MIN_LR=1e-6
-FACTOR_RL=0.3
-THRESHOLD=0.5
+PROJECT_ROOT=Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0,str(PROJECT_ROOT))
+
 # Permite ejecutar este script directamente (`python src/train/...py`) sin romper imports.
 if __name__=="__main__" and __package__ is None:
     project_root=Path(__file__).resolve().parents[2]
@@ -43,10 +27,27 @@ if __name__=="__main__" and __package__ is None:
 else:
     project_root=Path(__file__).resolve().parents[2]
 
+# Valores por defecto 
+EPOCHS_DEFAULT=10
+LR_DEFAULT=1e-3
+IMG_SIZE_DEFAULT=[224,224]
+BATCH_SIZE_DEFAULT=32
+AUG_LEVEL_DEFAULT="none"
+NORM_MODE_DEFAULT="imagenet"
+USE_CLASS_WEIGHTS_DEFAULT=False
+L2_REG_DEFAULT=5e-3
+DROPOUT_DEFAULT=0.8
+TRAIN_SIZE_DEFAULT=0.8
+VAL_SIZE_DEFAULT=0.1
+TEST_SIZE_DEFAULT=0.1
+SEED=42
+PATIENTE_STOPPING=2
+PATIENTE_RL=2
+MIN_LR=1e-6
+FACTOR_RL=0.3
+
+# Parser
 def parse_arguments():
-    """
-    Expone los hiperparámetros principales vía CLI manteniendo los defaults originales.
-    """
     parser = argparse.ArgumentParser(description="Entrena la CNN ligera (desde cero) para BreakHis.")
     project_root=Path(__file__).resolve().parents[2]
     default_base=project_root/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
@@ -61,6 +62,8 @@ def parse_arguments():
     parser.add_argument("--normalization-mode",default=NORM_MODE_DEFAULT,help=f"Modo de normalización (default {NORM_MODE_DEFAULT}).")
     parser.add_argument("--use-class-weights",dest="use_class_weights",action="store_true",default=USE_CLASS_WEIGHTS_DEFAULT,help=f"Usa pesos de clase (default {USE_CLASS_WEIGHTS_DEFAULT}).")
     parser.add_argument("--no-class-weights",dest="use_class_weights",action="store_false",help="Desactiva los pesos de clase si se desea.")
+    parser.add_argument("--l2-reg",type=float,default=L2_REG_DEFAULT,help=f"Regularización L2 (default {L2_REG_DEFAULT}).")
+    parser.add_argument("--dropout",type=float,default=DROPOUT_DEFAULT,help=f"Dropout en cabeza densa (default {DROPOUT_DEFAULT}).")
     parser.add_argument("--buffer-size",type=int,default=BUFFER_DEFAULT,help=f"Tamaño de buffer para shuffle (default {BUFFER_DEFAULT}).")
     parser.add_argument("--cache",dest="cache",action="store_true",default=CACHE_DEFAULT,help="Activa cache del dataset (default True).")
     parser.add_argument("--no-cache",dest="cache",action="store_false",help="Desactiva cache del dataset.")
@@ -83,13 +86,15 @@ def main():
     config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
                          ,args.normalization_mode.lower(),SEED,args.use_class_weights
                          ,args.cache,args.shuffle_train,args.prefetch)
+
+    config["gradcam_fixed_path"]=str(project_root/"splits"/"gradcam_fixed.json")
     # Chequeo de splits
     split_dir=resolve_split_dir(args.splits_dir,args.split_mode)
-    ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode)
+    ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode,dataset_type="binary",random_state=SEED,ensure_all_classes=False)
     # Obtenemos el dataset de TODOS los conjuntos de datos listos para ENTRENAR/VALIDAR
-    ds_bundle=get_datasets_basic(config, split_dir)
+    ds_bundle=get_datasets_basic(config,split_dir,False,"binary")
     # Modelo 1
-    model=build_cnn_light((*config["img_size"],3),1)
+    model=build_cnn_light((*config["img_size"],3),args.l2_reg,args.dropout)
     """
     Adam es un optimizador que combina momentun (historial) y adaptación del learning rate(cuanto aprende el modelo por cada paso
     (grande -> saltos largos, pequeño -> aprende lento, pero seguro)) por parámetro. Es un optimizador que funciona muy bien para imágenes, 
@@ -109,32 +114,13 @@ def main():
              ,tf.keras.metrics.SpecificityAtSensitivity(0.9,name="spec_at_sens90")]
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr),loss="binary_crossentropy",metrics=metrics)
     model.summary()
-    """
-    Para el control del entrenamiento, destacan los callbacks:
-    EarlyStopping: Si val loss no mejora en num patiente, entonces paramos, estamos convergiendo (overfitting), además, adicionalemnte ofrece la ventana de reducir el tiempo
-    de entrenamiento. Su objetivo es quedarse con la mejor época de las entrenadas, no con la última (riesgo: patiente puede ser engañosa y cuando el modelo puede sufrir, en num 
-    patience, luego podría liberarse del overfitting y obtener mejores resultados, pero arriesgado por tiempo de ejecución perdido. No existe un resultado asegurado en el 
-    futuro que sea mejor)
-    ReduceLROnPlateau: Complementa con adam, si el modelo no progresa más, entonces reducimos learning rate, para mejorar un poco más los mínimos. Básicamente hace que 
-    aprenda rápido pero que cuando empiece a limitarse que vaya más lento para no dar saltos grandes
-    ModelCheckpoint: Guarda el mejor modelo según la validación. , no el último (en este caso controlado por earlystopping)
-    """
-    callbacks=[
-        tf.keras.callbacks.EarlyStopping(monitor="val_loss",patience=PATIENTE_STOPPING,restore_best_weights=True)
-        ,tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss",factor=FACTOR_RL,patience=PATIENTE_RL, min_lr=MIN_LR)
-        ,tf.keras.callbacks.ModelCheckpoint(str(model_dir/"cnn_light_best.h5"),monitor="val_loss",save_best_only=True,verbose=1)]
-    
+    class_weights=ds_bundle["class_weights"]
     history=model.fit(ds_bundle["train_ds"],validation_data=ds_bundle["val_ds"],epochs=args.epochs
                       ,steps_per_epoch=ds_bundle["steps_per_epoch"],validation_steps=ds_bundle["val_steps"]
-                      ,class_weight=ds_bundle["class_weights"],callbacks=callbacks,verbose=1)
+                      ,class_weight=class_weights,verbose=1)
     
-    plot_training_history(history)
-    last_val_metrics={k:v[-1] for k,v in history.history.items() if k.startswith("val_") and v}
-    if last_val_metrics:
-        print("\nMétricas de validación de la última época:")
-        print(json.dumps(last_val_metrics,indent=2))
-    
-    run_eval_and_artifacts(model, ds_bundle, threshold=THRESHOLD,npz_path=None,gradcam_dir=True,last_conv_layer_name="last_conv", save_path=str(model_dir/"cnn_light_breakhis.h5"))
+    plot_training_history(history,None,None,True)
+    run_eval_and_artifacts(model, ds_bundle, gradcam_dir=True,last_conv_layer_name="auto", save_path=str(model_dir/"cnn_light_breakhis.h5"),prefix="TEST",force_target_class=None)
 
 if __name__=="__main__":
     main()

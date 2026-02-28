@@ -1,12 +1,13 @@
 import os, math, json
 import sys
 from pathlib import Path
-import argparse  # Parametrización por CLI
+import argparse  # Parametrización CLI sin alterar la lógica
 import numpy as np
 import tensorflow as tf
-import tensorflow_addons as tfa
 import matplotlib.pyplot as plt
 from src.config.create_dataset import DatasetConfig, BUFFER_DEFAULT, SHUFFLE_DEFAULT, PREFETCH_DEFAULT, CACHE_DEFAULT
+from src.config.readDataset import read_binary_breakhis_data
+from src.config.split_dataset import split_by_patient
 from src.models.models_definitions import build_efficientnetb0_transfer
 from src.utils.utils import ensure_splits,get_datasets_basic,run_eval_and_artifacts,resolve_split_dir,plot_training_history
 
@@ -19,13 +20,12 @@ USE_CLASS_WEIGHTS_DEFAULT=True
 TRAIN_SIZE_DEFAULT=0.8
 VAL_SIZE_DEFAULT=0.1
 TEST_SIZE_DEFAULT=0.1
-EPOCHS_HEAD_DEFAULT=15
-EPOCHS_FT_DEFAULT=40
+EPOCHS_HEAD_DEFAULT=12
+EPOCHS_FT_DEFAULT=30
 LR_HEAD_DEFAULT=3e-4
-LR_FT_DEFAULT=2e-5
-WEIGHT_DECAY_DEFAULT=1e-4
-DROPOUT_DEFAULT=0.4
-THRESHOLD_DEFAULT=0.5
+LR_FT_DEFAULT=5e-6
+DROPOUT_DEFAULT=0.45
+LABEL_SMOOTHING_DEFAULT=0.0
 ES_HEAD_PATIENCE=8
 ES_FT_PATIENCE=10
 RL_PATIENCE=4
@@ -39,14 +39,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def parse_arguments():
     """
-    Hiperparámetros expuestos por CLI manteniendo los defaults actuales.
+    Hiperparámetros expuestos vía CLI manteniendo los defaults originales.
     """
-    default_base=PROJECT_ROOT/"BreakHist"/"data"/"BreakHis - Breast Cancer Histopathological Database"/"dataset_cancer_v1"/"dataset_cancer_v1"/"classificacao_binaria"
-    default_splits=PROJECT_ROOT/"splits"
+    default_base = Path(__file__).resolve().parents[2] / "BreakHist" / "data" / "BreakHis - Breast Cancer Histopathological Database" / "dataset_cancer_v1" / "dataset_cancer_v1" / "classificacao_binaria"
+    default_splits = Path(__file__).resolve().parents[2] / "splits"
     parser=argparse.ArgumentParser(description="Transfer learning con EfficientNetB0 sobre BreakHis (binario).")
     parser.add_argument("--base-path",default=str(default_base),help="Ruta raíz del dataset BreakHis (binario).")
     parser.add_argument("--splits-dir",default=str(default_splits),help="Directorio de JSONs de split.")
-    parser.add_argument("--img-size",type=int,nargs=2,default=IMG_SIZE_DEFAULT,metavar=("H","W"),help="Tamaño de imagen (alto ancho).")
+    parser.add_argument("--img-size",type=int,nargs=2,default=IMG_SIZE_DEFAULT,metavar=("H", "W"),help="Tamaño de imagen (alto ancho).")
     parser.add_argument("--batch-size",type=int,default=BATCH_SIZE_DEFAULT,help=f"Batch size (default {BATCH_SIZE_DEFAULT}).")
     parser.add_argument("--augmentation-level",default=AUG_LEVEL_DEFAULT,help=f"Nivel de augmentación (default {AUG_LEVEL_DEFAULT}).")
     parser.add_argument("--normalization-mode",default=NORM_MODE_DEFAULT,help=f"Modo de normalización (default {NORM_MODE_DEFAULT}).")
@@ -59,9 +59,7 @@ def parse_arguments():
     parser.add_argument("--epochs-ft",type=int,default=EPOCHS_FT_DEFAULT,help=f"Épocas fase 2 (default {EPOCHS_FT_DEFAULT}).")
     parser.add_argument("--lr-head",type=float,default=LR_HEAD_DEFAULT,help=f"Learning rate fase 1 (default {LR_HEAD_DEFAULT}).")
     parser.add_argument("--lr-ft",type=float,default=LR_FT_DEFAULT,help=f"Learning rate fase 2 (default {LR_FT_DEFAULT}).")
-    parser.add_argument("--weight-decay",type=float,default=WEIGHT_DECAY_DEFAULT,help=f"Weight decay para AdamW (default {WEIGHT_DECAY_DEFAULT}).")
     parser.add_argument("--dropout",type=float,default=DROPOUT_DEFAULT,help=f"Dropout en la cabeza (default {DROPOUT_DEFAULT}).")
-    parser.add_argument("--threshold",type=float,default=THRESHOLD_DEFAULT,help=f"Umbral explícito para test (default {THRESHOLD_DEFAULT}).")
     parser.add_argument("--buffer-size",type=int,default=BUFFER_DEFAULT,help=f"Tamaño de buffer para shuffle (default {BUFFER_DEFAULT}).")
     parser.add_argument("--cache",dest="cache",action="store_true",default=CACHE_DEFAULT,help="Activa cache del dataset (default True).")
     parser.add_argument("--no-cache",dest="cache",action="store_false",help="Desactiva cache del dataset.")
@@ -74,62 +72,59 @@ def parse_arguments():
 
 def main():
     args=parse_arguments()
-    # Para EfficientNet: tu normalizador usa preprocess_input(efficientnet) y espera [0,255]
+
+    # normalizador con preprocess_input(efficientnet)
     config=DatasetConfig(tuple(args.img_size),args.batch_size,args.buffer_size,args.augmentation_level.lower()
                          ,args.normalization_mode.lower(),SEED,args.use_class_weights,args.cache
                          ,args.shuffle_train,args.prefetch)
+    config["gradcam_fixed_path"]=str(PROJECT_ROOT/"splits"/"gradcam_fixed.json")
     
     model_dir=PROJECT_ROOT/"models"/Path(__file__).stem
     model_dir.mkdir(parents=True,exist_ok=True)
     split_dir=resolve_split_dir(args.splits_dir,args.split_mode)
-    ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode)
-    ds=get_datasets_basic(config,split_dir,False)
+    ensure_splits(args.base_path,split_dir,args.train_size,args.val_size,args.test_size,args.split_mode,dataset_type="binary",random_state=SEED,ensure_all_classes=False)
+    ds=get_datasets_basic(config,split_dir,False,"binary")
     model,base=build_efficientnetb0_transfer((*config["img_size"],3),args.dropout)
-    loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05)
-    # entrenar cabeza 
-    opt1=tfa.optimizers.AdamW(learning_rate=args.lr_head,weight_decay=args.weight_decay,clipnorm=1.0)
-    model.compile(optimizer=opt1,loss=loss,metrics=[tf.keras.metrics.AUC(name="auc"),tf.keras.metrics.AUC(name="prc", curve="PR")
-                                                    ,tf.keras.metrics.BinaryAccuracy(name="acc"),tf.keras.metrics.Recall(name="recall")
-                                                    ,tf.keras.metrics.Precision(name="precision")
-                                                    ,tf.keras.metrics.SensitivityAtSpecificity(0.9,name="sens_at_spec90"),tf.keras.metrics.SpecificityAtSensitivity(0.9,name="spec_at_sens90")])
-
-    callbacks=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"cnn7_effnetb0_best.weights.h5"),monitor="val_auc",mode="max",save_best_only=True,save_weights_only=True,verbose=1)
-           ,tf.keras.callbacks.EarlyStopping(monitor="val_auc",mode="max",patience=ES_HEAD_PATIENCE,restore_best_weights=True)]
+    model.summary()
+    # entrenar cabeza
+    opt1=tf.keras.optimizers.Adam(learning_rate=args.lr_head,clipnorm=1.0)
+    loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=LABEL_SMOOTHING_DEFAULT)
+    model.compile(
+        optimizer=opt1,loss=loss,
+        metrics=[tf.keras.metrics.AUC(name="auc"),tf.keras.metrics.AUC(name="prc",curve="PR")
+                 ,tf.keras.metrics.BinaryAccuracy(name="acc"),tf.keras.metrics.Recall(name="recall"),tf.keras.metrics.Precision(name="precision")
+                 ,tf.keras.metrics.SensitivityAtSpecificity(0.9,name="sens_at_spec90"),tf.keras.metrics.SpecificityAtSensitivity(0.9,name="spec_at_sens90")])
+    
+    callbacks=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"cnn7_effnetb0_best.weights.h5"),monitor="val_auc",mode="max",save_best_only=True,save_weights_only=True, verbose=1),
+         tf.keras.callbacks.EarlyStopping(monitor="val_auc",mode="max",patience=ES_HEAD_PATIENCE,restore_best_weights=True)]
 
     history_head=model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_head,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"]
               ,class_weight=ds["class_weights"],callbacks=callbacks,verbose=1)
-    plot_training_history(history_head)
+    plot_training_history(history_head,None,None,True)
 
-    # fine-tuning parcial
+    # fine-tuning 
     base.trainable=True
-    # EfficientNet suele ir mejor afinando un poco más de arriba, pero sin abrirla entera
-    for layer in base.layers[:-40]:
+    # Congelar casi todo y afinar solo top
+    for layer in base.layers[:-45]:
         layer.trainable=False
+    model.summary()
 
-    opt2=tfa.optimizers.AdamW(learning_rate=args.lr_ft,weight_decay=args.weight_decay,clipnorm=1.0)
-    model.compile(optimizer=opt2,loss=loss,
-        metrics=[tf.keras.metrics.AUC(name="auc"),tf.keras.metrics.AUC(name="prc", curve="PR"),tf.keras.metrics.BinaryAccuracy(name="acc")
-                ,tf.keras.metrics.Recall(name="recall"),tf.keras.metrics.Precision(name="precision")
-                ,tf.keras.metrics.SensitivityAtSpecificity(0.9,name="sens_at_spec90"),tf.keras.metrics.SpecificityAtSensitivity(0.9,name="spec_at_sens90")])
+    opt2=tf.keras.optimizers.Adam(learning_rate=args.lr_ft,clipnorm=1.0)
+    model.compile(optimizer=opt2,loss=loss,metrics=[tf.keras.metrics.AUC(name="auc"),tf.keras.metrics.AUC(name="prc",curve="PR"),tf.keras.metrics.BinaryAccuracy(name="acc")
+                                                    ,tf.keras.metrics.Recall(name="recall"),tf.keras.metrics.Precision(name="precision")
+                                                    ,tf.keras.metrics.SensitivityAtSpecificity(0.9,name="sens_at_spec90"),tf.keras.metrics.SpecificityAtSensitivity(0.9,name="spec_at_sens90")])
 
     callbacks2=[tf.keras.callbacks.ModelCheckpoint(str(model_dir/"cnn7_effnetb0_finetuned_best.weights.h5"),monitor="val_auc",mode="max",save_best_only=True,save_weights_only=True,verbose=1)
             ,tf.keras.callbacks.EarlyStopping(monitor="val_auc",mode="max",patience=ES_FT_PATIENCE,restore_best_weights=True)
-            ,tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc",mode="max",factor=RL_FACTOR,patience=RL_PATIENCE, min_lr=RL_MIN_LR,verbose=1)]
+            ,tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc",mode="max",factor=RL_FACTOR,patience=RL_PATIENCE,min_lr=RL_MIN_LR,verbose=1)]
 
-    history_ft=model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_ft,steps_per_epoch=ds["steps_per_epoch"],validation_steps=ds["val_steps"],class_weight=ds["class_weights"]
+    history_ft=model.fit(ds["train_ds"],validation_data=ds["val_ds"],epochs=args.epochs_ft,steps_per_epoch=ds["steps_per_epoch"]
+              ,validation_steps=ds["val_steps"]
+              ,class_weight=ds["class_weights"]
               ,callbacks=callbacks2,verbose=1)
-    plot_training_history(history_ft)
+    
+    plot_training_history(history_ft,None,None,True)
+    run_eval_and_artifacts(model,ds,gradcam_dir=True,last_conv_layer_name="auto",save_path=str(model_dir/"cnn7_effnetb0_transfer_final.weights.h5"),prefix="TEST",force_target_class=None)
 
-    run_eval_and_artifacts(
-        model,
-        ds,
-        args.threshold,
-        npz_path=str(model_dir/"cnn7_effnetb0_predictions.npz"),
-        gradcam_dir=True,
-        last_conv_layer_name="top_activation",
-        save_path=None,  # evitamos model.save con AdamW
-    )
-    model.save_weights(str(model_dir/"cnn7_effnetb0_transfer_final.weights.h5"))
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

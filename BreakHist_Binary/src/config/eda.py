@@ -15,22 +15,13 @@ try:
 except Exception:
     SKIMAGE_AVAILABLE=False
 
-# Paleta y orden de aumentos fijos para todas las graficas
 PALETTE=['#4C72B0','#DD8452']
 ZOOM_ORDER=['40X','100X','200X','400X']
-
-# Agrega medias y desviaciones por canal segun agrupacion
-def _agg_color(df_color,group_col):
-    res={}
-    for key,sub in df_color.groupby(group_col):
-        res[key]={ch:{'mean':float(sub[ch].mean()),'std':float(sub[ch].std())} for ch in ['R','G','B']}
-    return res
-
-# Path base configurable via variable de entorno para portabilidad
+# Path base para portabilidad 
 base_path=os.environ.get('BREAKHIS_BASE',os.path.join(os.getcwd(),'BreakHist_Binary','BreakHist','data','BreakHis - Breast Cancer Histopathological Database','dataset_cancer_v1','dataset_cancer_v1','classificacao_binaria'))
-# Numero de imagenes a muestrear en el analisis de imagenes
+# Numero de imagenes 
 sample_images=100
-# Mapeo de labels de la base BreakHis
+# Mapeo  labels
 label_map={'benign':0,'malignant':1}
 data={}
 all_images=[]
@@ -40,9 +31,9 @@ slides=[]
 if not os.path.isdir(base_path):
     raise ValueError(f'Ruta no valida: {base_path}')
 
-# Recorrido del arbol de zooms y clases, cargando paths y labels
+# Recorrido del directorio del database (igual que ReadDataset con Breakhist)
 zoom_levels=sorted(os.listdir(base_path))
-print(f'Zoom levels encontrados: {zoom_levels}')
+print(f'Zoom levels encontrados:{zoom_levels}')
 for zoom in zoom_levels:
     zoom_path=os.path.join(base_path,zoom)
     if not os.path.isdir(zoom_path):
@@ -51,7 +42,7 @@ for zoom in zoom_levels:
     for class_name in ['benign','malignant']:
         class_path=os.path.join(zoom_path,class_name)
         if not os.path.isdir(class_path):
-            print(f'Carpeta no encontrada: {class_path}')
+            print(f'Carpeta no encontrada:{class_path}')
             continue
         image_files=[f for f in os.listdir(class_path) if f.lower().endswith(('.png','.jpg','.jpeg'))]
         image_paths=[]
@@ -69,18 +60,17 @@ for zoom in zoom_levels:
             all_labels.append(label_map[class_name])
             slides.append(patient_id)
         data[zoom][class_name]=image_paths
-        print(f'Zoom {zoom} | Clase {class_name}')
-        print(f'Imagenes: {len(image_paths)}')
-        print(f'Label: {label_map[class_name]}')
-        print(f'Pacientes unicos acumulados: {len(set(slides))}')
+        print(f'Zoom {zoom}|Clase {class_name}')
+        print(f'Imagenes:{len(image_paths)}')
+        print(f'Label:{label_map[class_name]}')
+        print(f'Pacientes unicos acumulados:{len(set(slides))}')
 print('RESUMEN FINAL')
-print(f'Total imagenes: {len(all_images)}')
-print(f'Total benignas: {all_labels.count(0)}')
-print(f'Total malignas: {all_labels.count(1)}')
-print(f'Total pacientes unicos: {len(set(slides))}')
-print(f'Label map: {label_map}')
+print(f'Total imagenes:{len(all_images)}')
+print(f'Total benignas:{all_labels.count(0)}')
+print(f'Total malignas:{all_labels.count(1)}')
+print(f'Total pacientes unicos:{len(set(slides))}')
+print(f'Label map:{label_map}')
 
-# Preparar dataframe con metadata derivada del nombre de archivo
 registros=[]
 for img_path,label,slide in tqdm(zip(all_images,all_labels,slides),total=len(all_images),desc='Procesando',disable=True):
     try:
@@ -100,14 +90,17 @@ for img_path,label,slide in tqdm(zip(all_images,all_labels,slides),total=len(all
         sequence=name_parts[4]
         registros.append({'filepath':img_path,'filename':filename,'label':label,'label_name':class_name,'patient_id':slide,'zoom':zoom,'magnification':zoom.replace('X',''),'dataset':dataset,'class_code':class_code,'subclass':subclass,'year':year,'sequence':sequence})
     except Exception as e:
-        print(f'Error procesando {img_path}: {e}')
+        print(f'Error procesando {img_path}:{e}')
 df=pd.DataFrame(registros)
 totals={'total_imagenes':len(df),'total_pacientes':df["patient_id"].nunique(),'total_zooms':df["zoom"].nunique()}
 
 # Analisis basico
 stats_basicas={}
 distribucion=df['label_name'].value_counts()
-stats_df=pd.DataFrame({'Clase':distribucion.index,'Imagenes':distribucion.values,'Porcentaje':(distribucion.values/len(df)*100).round(2),'Pacientes Unicos':[df[df['label_name']==c]['patient_id'].nunique() for c in distribucion.index]})
+pacientes_unicos=[]
+for c in distribucion.index:
+    pacientes_unicos.append(df[df['label_name']==c]['patient_id'].nunique())
+stats_df=pd.DataFrame({'Clase':distribucion.index,'Imagenes':distribucion.values,'Porcentaje':(distribucion.values/len(df)*100).round(2),'Pacientes Unicos':pacientes_unicos})
 ratio=stats_df['Imagenes'].max()/stats_df['Imagenes'].min() if len(stats_df['Imagenes'])>1 else 1
 cv=stats_df['Imagenes'].std()/stats_df['Imagenes'].mean() if len(stats_df['Imagenes'])>0 else 0
 stats_basicas={'total_imagenes':len(df),'total_pacientes':df["patient_id"].nunique(),'distribucion_clases':stats_df.to_dict('records'),'ratio_balanceo':ratio,'coeficiente_variacion':cv,'needs_balancing':ratio>1.5}
@@ -133,9 +126,12 @@ for i,val in enumerate(stats_df['Pacientes Unicos']):
 plt.tight_layout()
 plt.show(block=True)
 
-# Analisis por aumento (conteos y pacientes por zoom)
-zoom_stats_df=df.groupby('zoom').agg({'label':'count','patient_id':'nunique','label_name':lambda x:(x=='benign').sum()}).reset_index()
-zoom_stats_df.columns=['Zoom','Total_Imagenes','Pacientes_Unicos','Benignas']
+# Analisis por aumento
+zoom_counts=df.groupby('zoom')['label'].count()
+zoom_patients=df.groupby('zoom')['patient_id'].nunique()
+zoom_benign=df[df['label_name']=='benign'].groupby('zoom')['label_name'].count()
+zoom_stats_df=pd.DataFrame({'Zoom':zoom_counts.index,'Total_Imagenes':zoom_counts.values,'Pacientes_Unicos':zoom_patients.reindex(zoom_counts.index).values})
+zoom_stats_df['Benignas']=zoom_benign.reindex(zoom_counts.index).fillna(0).values
 zoom_stats_df['Malignas']=zoom_stats_df['Total_Imagenes']-zoom_stats_df['Benignas']
 zoom_stats_df['Zoom']=pd.Categorical(zoom_stats_df['Zoom'],categories=ZOOM_ORDER,ordered=True)
 zoom_stats_df=zoom_stats_df.sort_values('Zoom')
@@ -163,11 +159,19 @@ plt.show(block=True)
 # Analisis pacientes
 imagenes_por_paciente=df.groupby('patient_id').size()
 stats_pacientes={'media':imagenes_por_paciente.mean(),'mediana':imagenes_por_paciente.median(),'std':imagenes_por_paciente.std(),'min':imagenes_por_paciente.min(),'max':imagenes_por_paciente.max(),'q1':imagenes_por_paciente.quantile(0.25),'q3':imagenes_por_paciente.quantile(0.75),'pacientes_con_1_imagen':(imagenes_por_paciente==1).sum(),'pacientes_con_mas_de_10_imagenes':(imagenes_por_paciente>10).sum(),'total_pacientes':len(imagenes_por_paciente),'coeficiente_variacion':imagenes_por_paciente.std()/imagenes_por_paciente.mean()}
-pacientes_solo_benignos=df.groupby('patient_id').filter(lambda x:(x['label_name']=='benign').all())
-pacientes_solo_malignos=df.groupby('patient_id').filter(lambda x:(x['label_name']=='malignant').all())
-pacientes_mixtos=df.groupby('patient_id').filter(lambda x:len(x['label_name'].unique())>1)
-num_mixtos=pacientes_mixtos['patient_id'].nunique()
-print(f'Pacientes mixtos (ambas clases): {num_mixtos}')
+pacientes_solo_benignos=[]
+pacientes_solo_malignos=[]
+pacientes_mixtos=[]
+for pid,sub in df.groupby('patient_id'):
+    labels=sub['label_name'].unique().tolist()
+    if len(labels)>1:
+        pacientes_mixtos.append(pid)
+    elif labels[0]=='benign':
+        pacientes_solo_benignos.append(pid)
+    elif labels[0]=='malignant':
+        pacientes_solo_malignos.append(pid)
+num_mixtos=len(pacientes_mixtos)
+print(f'Pacientes mixtos(ambas clases):{num_mixtos}')
 fig,axes=plt.subplots(1,2,figsize=(14,6))
 axes[0].hist(imagenes_por_paciente,bins=30,edgecolor='black',alpha=0.7,color='steelblue')
 axes[0].axvline(stats_pacientes['media'],color='red',linestyle='--',linewidth=2,label=f"Media:{stats_pacientes['media']:.1f}")
@@ -183,11 +187,21 @@ axes[1].set_xticklabels(['Pacientes'])
 plt.tight_layout()
 plt.show(block=True)
 tipos=['Solo benignos','Solo malignos','Mixtos']
-counts=[pacientes_solo_benignos['patient_id'].nunique(),pacientes_solo_malignos['patient_id'].nunique(),num_mixtos]
+counts=[len(pacientes_solo_benignos),len(pacientes_solo_malignos),num_mixtos]
 patient_stats={'imagenes_por_paciente':stats_pacientes,'tipos_pacientes':dict(zip(tipos,counts)),'pacientes_mixtos':num_mixtos}
 
-# Analisis imagenes muestra (muestra balanceada por clase)
-sample_df=df.groupby('label_name',group_keys=False).apply(lambda x:x.sample(min(len(x),sample_images//2),random_state=42)).sample(frac=1,random_state=42)
+# Analisis imagenes muestra
+sample_rows=[]
+for cls in df['label_name'].unique():
+    subset=df[df['label_name']==cls]
+    take=min(len(subset),sample_images//2)
+    if take>0:
+        sample_rows.append(subset.sample(take,random_state=42))
+if sample_rows:
+    sample_df=pd.concat(sample_rows,ignore_index=True)
+    sample_df=sample_df.sample(frac=1,random_state=42)
+else:
+    sample_df=df.head(0)
 resultados={'resoluciones':[],'blur_scores':[],'contraste_scores':[],'brillo_promedio':[],'entropia':[],'zoom':[],'label':[],'patient_id':[]}
 for _,row in tqdm(sample_df.iterrows(),total=len(sample_df),desc='Procesando imagenes',disable=True):
     try:
@@ -207,7 +221,7 @@ for _,row in tqdm(sample_df.iterrows(),total=len(sample_df),desc='Procesando ima
         resultados['patient_id'].append(row['patient_id'])
         img.close()
     except Exception as e:
-        print(f"Error procesando {row['filename']}: {e}")
+        print(f"Error procesando {row['filename']}:{e}")
 df_resultados=pd.DataFrame(resultados)
 image_stats=df_resultados
 numeric_cols=['blur_scores','contraste_scores','brillo_promedio','entropia']
@@ -243,7 +257,7 @@ if all(col in df_resultados.columns for col in numeric_cols):
     plt.tight_layout()
     plt.show(block=True)
 
-# Visualizaciones de imagenes por subtipo (muestra compacta en matriz) y matriz aumentos-subtipos
+# Visualizaciones de imagenes por subtipo
 if 'subclass' in df.columns and not df['subclass'].isnull().all():
     subtypes=df['subclass'].unique().tolist()
     samples=[]
@@ -269,7 +283,7 @@ if 'subclass' in df.columns and not df['subclass'].isnull().all():
         plt.tight_layout()
         plt.show(block=True)
 
-    # Matriz 4x4: 4 subtipos aleatorios x 4 aumentos
+    # Muestreo de algunas imágenes
     available_subs=subtypes.copy()
     random.shuffle(available_subs)
     selected_subs=available_subs[:4] if len(available_subs)>=4 else available_subs
@@ -297,7 +311,7 @@ if 'subclass' in df.columns and not df['subclass'].isnull().all():
     plt.tight_layout()
     plt.show(block=True)
 
-# Analisis subclases (barras por subclase y pacientes)
+# Analisis subclases 
 subclase_stats=None
 if 'subclass' in df.columns:
     subclases_counts=df['subclass'].value_counts()
@@ -358,7 +372,7 @@ pacientes_df=pd.DataFrame(pacientes_info)
 resumen={'pacientes_1_imagen':int((pacientes_df['total_images']==1).sum()),'pacientes_2_5':int(((pacientes_df['total_images']>=2)&(pacientes_df['total_images']<=5)).sum()),'pacientes_6_10':int(((pacientes_df['total_images']>=6)&(pacientes_df['total_images']<=10)).sum()),'pacientes_mas_10':int((pacientes_df['total_images']>10).sum()),'pacientes_puros':int((pacientes_df['unique_classes']==1).sum()),'pacientes_mixtos':int((pacientes_df['unique_classes']>1).sum())}
 split_info={'pacientes_df':pacientes_df.to_dict('records'),'resumen':resumen}
 
-# Analisis calidad (blur y contraste basicos)
+# Analisis calidad
 sample=df.sample(min(len(df),200),random_state=42)
 blur_scores=[]
 contrast_scores=[]
@@ -394,7 +408,7 @@ ax[1].set_ylabel('Frecuencia')
 plt.tight_layout()
 plt.show(block=True)
 
-# Analisis color y texturas (promedios por canal e indicadores GLCM)
+# Analisis color y texturas 
 sample=df.sample(min(len(df),200),random_state=42)
 color_records=[]
 glcm_records=[]
@@ -425,8 +439,16 @@ if color_records:
         ax.set_ylabel('Densidad')
     plt.tight_layout()
     plt.show(block=True)
-    stats_color['por_clase']=_agg_color(df_color,'label')
-    stats_color['por_zoom']=_agg_color(df_color,'zoom')
+    stats_color['por_clase']={}
+    for key,sub in df_color.groupby('label'):
+        stats_color['por_clase'][key]={}
+        for ch in ['R','G','B']:
+            stats_color['por_clase'][key][ch]={'mean':float(sub[ch].mean()),'std':float(sub[ch].std())}
+    stats_color['por_zoom']={}
+    for key,sub in df_color.groupby('zoom'):
+        stats_color['por_zoom'][key]={}
+        for ch in ['R','G','B']:
+            stats_color['por_zoom'][key][ch]={'mean':float(sub[ch].mean()),'std':float(sub[ch].std())}
 
 texture_stats={}
 
@@ -443,21 +465,25 @@ if SKIMAGE_AVAILABLE and glcm_records:
 
     plt.tight_layout()
     plt.show(block=True)
-    texture_stats['por_clase']={lbl:{m:float(sub[m].mean()) for m in metrics} for lbl,sub in glcm_df.groupby('label')}
+    texture_stats['por_clase']={}
+    for lbl,sub in glcm_df.groupby('label'):
+        texture_stats['por_clase'][lbl]={}
+        for m in metrics:
+            texture_stats['por_clase'][lbl][m]=float(sub[m].mean())
 
 elif not SKIMAGE_AVAILABLE:
-    print('scikit-image no disponible: se omite analisis GLCM.')
+    print('scikit-image no disponible:se omite analisis GLCM.')
 
 color_texture_stats={'color':stats_color,'textura':texture_stats}
 
 print('Resumen ejecucion')
-print(f"- Imagenes: {totals.get('total_imagenes',0)}")
-print(f"- Pacientes: {totals.get('total_pacientes',0)}")
-print(f"- Zooms: {totals.get('total_zooms',0)}")
+print(f"Imagenes:{totals.get('total_imagenes',0)}")
+print(f"Pacientes:{totals.get('total_pacientes',0)}")
+print(f"Zooms:{totals.get('total_zooms',0)}")
 if stats_basicas:
-    print(f"- Balance imgs: {stats_basicas.get('ratio_balanceo',0):.2f}:1")
-    print(f"- Varianza imgs (coef var): {stats_basicas.get('coeficiente_variacion',0):.3f}")
+    print(f"Balance imgs:{stats_basicas.get('ratio_balanceo',0):.2f}:1")
+    print(f"Varianza imgs(coef var):{stats_basicas.get('coeficiente_variacion',0):.3f}")
 if patient_stats:
     mixtos=patient_stats.get('pacientes_mixtos',0)
     total=totals.get('total_pacientes',1)
-    print(f"- Pacientes mixtos: {mixtos} ({mixtos/total*100:.1f}%)")
+    print(f"Pacientes mixtos:{mixtos}({mixtos/total*100:.1f}%)")

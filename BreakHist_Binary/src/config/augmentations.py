@@ -8,7 +8,7 @@ MEDIUM="medium"
 ADVANCED="advanced"
 EXPERT="expert"
 
-# Cache de capas aleatorias para evitar crear variables dentro de tf.function
+# Diccionarios de reutilización
 ROT_LAYERS={}
 ZOOM_LAYERS={}
 TRANS_LAYERS={}
@@ -36,6 +36,12 @@ def random_bool(prob):
     else:
         return False
 
+"""
+Las siguientes funciones han sido implementadas con el fin de que las capas de augmentación de Keras no creen variables nuevas (con mismo valor) cada vez que se llaman 
+dentro de una función decorada con @tf.function (como es el caso de tf.data.Dataset.map). Esto se consigue almacenando las capas ya creadas en un diccionario
+y reutilizándolas cuando se solicitan con los mismos parámetros. De esta forma, evitamos la creación de variables dentro de tf.function (reduciendo el tiempo de ejecución
+y evitando errores).
+"""
 def get_rot_layer(rotation_deg):
     key=float(rotation_deg)
     layer=ROT_LAYERS.get(key)
@@ -52,7 +58,7 @@ def get_zoom_layer(zoom_val):
         ZOOM_LAYERS[key]=layer
     return layer
 
-def get_trans_layer(shift_val):
+def get_shift_layer(shift_val):
     key=float(shift_val)
     layer=TRANS_LAYERS.get(key)
     if layer is None:
@@ -70,7 +76,7 @@ def apply_basic_augmentations(image,params,img_size):
     if params.get("zoom",0) > 0:
         image = get_zoom_layer(params["zoom"])(image,training=True)
     if params.get("shift",0) > 0: 
-        image = get_trans_layer(params["shift"])(image,training=True)
+        image = get_shift_layer(params["shift"])(image,training=True)
     if params.get("flip_prob",0) > 0:
         if random_bool(params.get("flip_prob",0)):
             image=tf.image.flip_left_right(image)

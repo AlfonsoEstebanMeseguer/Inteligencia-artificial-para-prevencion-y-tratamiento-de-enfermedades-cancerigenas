@@ -31,4 +31,4 @@ def normalize_image(image,config):
         return efficientnet_preprocess(image)
     if mode in (STANDARD,CUSTOM):
         return image/255.0
-    raise ValueError(f"Modo de normalización no soportado: {mode}")
+    raise ValueError(f"Modo de normalización no soportado:{mode}")

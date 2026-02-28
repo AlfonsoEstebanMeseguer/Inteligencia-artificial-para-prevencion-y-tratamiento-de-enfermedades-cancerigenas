@@ -1,0 +1,15 @@
+{
+  "images": [
+    "D:\\TFG_BREAKHIST\\BreakHist_Binary\\BreakHist\\data\\BreakHis - Breast Cancer Histopathological Database\\dataset_cancer_v1\\dataset_cancer_v1\\classificacao_binaria\\100X\\benign\\SOB_B_F-14-21998CD-100-001.png",
+    "D:\\TFG_BREAKHIST\\BreakHist_Binary\\BreakHist\\data\\BreakHis - Breast Cancer Histopathological Database\\dataset_cancer_v1\\dataset_cancer_v1\\classificacao_binaria\\100X\\benign\\SOB_B_F-14-21998CD-100-002.png",
+    "D:\\TFG_BREAKHIST\\BreakHist_Binary\\BreakHist\\data\\BreakHis - Breast Cancer Histopathological Database\\dataset_cancer_v1\\dataset_cancer_v1\\classificacao_binaria\\100X\\malignant\\SOB_M_DC-14-15696-100-001.png",
+    "D:\\TFG_BREAKHIST\\BreakHist_Binary\\BreakHist\\data\\BreakHis - Breast Cancer Histopathological Database\\dataset_cancer_v1\\dataset_cancer_v1\\classificacao_binaria\\100X\\malignant\\SOB_M_DC-14-15696-100-002.png"
+  ],
+  "labels": [
+    0,
+    0,
+    1,
+    1
+  ],
+  "source": "d:\\TFG_BREAKHIST\\BreakHist_Binary\\splits\\split_patient\\test.json"
+}
