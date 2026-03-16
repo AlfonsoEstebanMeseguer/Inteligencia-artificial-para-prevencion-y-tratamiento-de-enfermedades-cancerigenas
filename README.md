@@ -1,5 +1,3 @@
-[Generado por IA]
-[Faltan Bases de datos, habría que colocarlas en su carpeta correspondiente]
 
 # TFG_BREAKHIST 
  
